@@ -7,3 +7,4 @@ subtitle.txt
 .env
 !.env.example
 .venv
+audio_*.wav

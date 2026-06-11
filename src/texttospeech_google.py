@@ -56,7 +56,7 @@ def _config_texttospeech_request(
     return (speech_request, mark_array)
 
 
-def generate_audio_and_subtitle(
+async def generate_audio_and_subtitle(
     user_question: str, bot_response: str, audio_filename="audio.mp3"
 ):
     text_to_transform_to_audio = user_question + "? " + bot_response
@@ -70,5 +70,5 @@ def generate_audio_and_subtitle(
     )  # noqa: E501
     response = client.synthesize_speech(request=request)
 
-    play_audio(audio_filename, response.audio_content)
+    await play_audio(audio_filename, response.audio_content)
     generate_subtitle_file(response.timepoints, mark_array)

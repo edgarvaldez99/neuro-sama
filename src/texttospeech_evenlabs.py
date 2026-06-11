@@ -4,7 +4,7 @@ from .credentials import ELEVENLABS_APIKEY, ELEVENLABS_VOICEID
 from .generate_audio import play_audio
 
 
-def get_speech_by_text(
+async def get_speech_by_text(
     user_question: str, bot_response: str, audio_filename="audio.mp3"
 ):
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICEID}"
@@ -34,4 +34,4 @@ def get_speech_by_text(
     response = requests.request(
         "POST", url, json=payload, headers=headers, params=querystring
     )
-    play_audio(audio_filename, response._content)
+    await play_audio(audio_filename, response._content)
