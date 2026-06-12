@@ -674,6 +674,27 @@ pipenv = ["pipenv"]
 poetry = ["poetry"]
 
 [[package]]
+name = "edge-tts"
+version = "7.2.8"
+description = "Microsoft Edge's TTS"
+optional = false
+python-versions = ">=3.7"
+groups = ["main"]
+files = [
+    {file = "edge_tts-7.2.8-py3-none-any.whl", hash = "sha256:361fe48ce7ef613adbe30f664e3765dd71029c6cb57427279eff8ad6df2eb211"},
+    {file = "edge_tts-7.2.8.tar.gz", hash = "sha256:fcf185a0d527a0d2d003f9d5841facc1d5e0e7b3b88d5df9c32990402c6b8cd0"},
+]
+
+[package.dependencies]
+aiohttp = ">=3.8.0,<4.0.0"
+certifi = ">=2023.11.17"
+tabulate = ">=0.4.4,<1.0.0"
+typing-extensions = ">=4.1.0,<5.0.0"
+
+[package.extras]
+dev = ["black", "isort", "mypy", "pylint", "types-tabulate"]
+
+[[package]]
 name = "filelock"
 version = "3.16.1"
 description = "A platform independent file lock."
@@ -3215,6 +3236,21 @@ mpmath = ">=1.1.0,<1.4"
 dev = ["hypothesis (>=6.70.0)", "pytest (>=7.1.0)"]
 
 [[package]]
+name = "tabulate"
+version = "0.10.0"
+description = "Pretty-print tabular data"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "tabulate-0.10.0-py3-none-any.whl", hash = "sha256:f0b0622e567335c8fabaaa659f1b33bcb6ddfe2e496071b743aa113f8774f2d3"},
+    {file = "tabulate-0.10.0.tar.gz", hash = "sha256:e2cfde8f79420f6deeffdeda9aaec3b6bc5abce947655d17ac662b126e48a60d"},
+]
+
+[package.extras]
+widechars = ["wcwidth"]
+
+[[package]]
 name = "tifffile"
 version = "2024.2.12"
 description = "Read and write TIFF files"
@@ -3793,4 +3829,4 @@ multidict = ">=4.0"
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "c90cbd5c44e5f991e32886b586828650cd866798364a636899ad76e92ed87ccb"
+content-hash = "b2a672aaba4afa954ca520c4e550514805e2a685aa7d6954c87b1d9a7060c041"

@@ -8,7 +8,7 @@ from .chat_ollama import ollama_completion
 from .chattypes import ChatCompletionMessage
 from .credentials import BOT_NAME, TWITCH_CHANNEL, TWITCH_TOKEN
 from .filter_message import check_and_filter_user_message
-from .texttospeech_piper import get_speech_by_text
+from .texttospeech_edge import get_speech_by_text
 from .utils import open_file, strip_cjk
 from .vts_controller import EMOTION_TO_HOTKEY, get_vts_instance
 from .websocket import open_websocket

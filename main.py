@@ -4,7 +4,7 @@ from src.enums import Mode
 
 os.environ["BASE_DIR_PATH"] = os.getcwd()
 
-mode = Mode.STREAMER  # Recommended Mode
+mode = Mode.VLC_CLOUD  # Recommended Mode for Integrated AI (Ollama + Edge TTS)
 
 
 if __name__ == "__main__":

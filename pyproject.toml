@@ -41,6 +41,7 @@ requests = "^2.34.2"
 piper-tts = "^1.4.2"
 sherpa-onnx = "^1.13.2"
 proto-plus = "^1.28.0"
+edge-tts = "^7.2.8"
 
 [tool.poetry.group.dev.dependencies]
 black = "^24.4.0"

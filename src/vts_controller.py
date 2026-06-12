@@ -16,29 +16,26 @@ class VTSController:
     async def connect(self):
         try:
             await self.vts.connect()
+            print("DEBUG: Conexión establecida con VTube Studio. Autenticando...")
             await self.vts.request_authenticate_token()
             await self.vts.request_authenticate()
-            await asyncio.sleep(1.0)  # Pausa para asegurar sesión en VTS
+            await asyncio.sleep(2.0)  # Aumentamos pausa para asegurar sesión
             self.connected = True
-            print("DEBUG: Conectado y autenticado en VTube Studio.")
+            print("DEBUG: Autenticación completada.")
 
-            # Validar modelo cargado
-            model_request = {
-                "apiName": "VTubeStudioPublicAPI",
-                "apiVersion": "1.0",
-                "requestID": "CurrentModelRequest",
-                "messageType": "CurrentModelRequest",
-            }
+            # Validar modelo cargado usando el constructor de pyvts
+            model_request = self.vts.vts_request.requestCurrentModel()
             model_data = await self.vts.request(model_request)
+            
             model_loaded = model_data.get("data", {}).get("modelLoaded", False)
             if not model_loaded:
-                print("DEBUG: AVISO - No hay ningún modelo cargado en VTube Studio.")
+                print("DEBUG: [AVISO] No hay ningún modelo cargado en VTube Studio.")
             else:
                 model_name = model_data.get("data", {}).get("modelName", "Desconocido")
                 print(f"DEBUG: Modelo detectado: {model_name}")
 
         except Exception as e:
-            print(f"DEBUG: Error al conectar con VTube Studio: {e}")
+            print(f"DEBUG: Error al conectar/autenticar con VTube Studio: {e}")
             self.connected = False
 
     async def trigger_hotkey(self, hotkey_name: str):
@@ -47,51 +44,70 @@ class VTSController:
 
         if self.connected:
             try:
-                # Según el manual oficial de VTS: HotkeysInCurrentModelRequest
-                list_request = {
-                    "apiName": "VTubeStudioPublicAPI",
-                    "apiVersion": "1.0",
-                    "requestID": "HotkeysInCurrentModelRequest",
-                    "messageType": "HotkeysInCurrentModelRequest",
-                }
-
+                # 1. Intentar por Hotkey primero (método tradicional)
+                list_request = self.vts.vts_request.requestHotkeysInCurrentModel()
                 hotkeys_data = await self.vts.request(list_request)
                 hotkey_list = hotkeys_data.get("data", {}).get("availableHotkeys", [])
 
                 hotkey_id = None
                 for hk in hotkey_list:
-                    # Buscamos por nombre exacto (insensible a espacios)
-                    if (
-                        hk.get("name", "").strip().lower()
-                        == hotkey_name.strip().lower()
-                    ):
+                    if hk.get("name", "").strip().lower() == hotkey_name.strip().lower():
                         hotkey_id = hk["hotkeyID"]
                         break
 
                 if hotkey_id:
-                    trigger_request = {
+                    trigger_request = self.vts.vts_request.requestTriggerHotkey(hotkey_id)
+                    await self.vts.request(trigger_request)
+                    print(f"DEBUG: Hotkey '{hotkey_name}' activado.")
+                    return
+
+                # 2. Si no hay hotkey, intentar activar expresión directamente
+                # A veces el usuario tiene archivos .exp3.json pero no creó hotkeys
+                print(f"DEBUG: Hotkey '{hotkey_name}' no encontrado. Buscando expresión...")
+                
+                exp_request = {
+                    "apiName": "VTubeStudioPublicAPI",
+                    "apiVersion": "1.0",
+                    "requestID": "ExpressionStateRequest",
+                    "messageType": "ExpressionStateRequest"
+                }
+                exp_data = await self.vts.request(exp_request)
+                expressions = exp_data.get("data", {}).get("expressions", [])
+                
+                exp_file = None
+                nombres_exp = []
+                for exp in expressions:
+                    name = exp.get("name", "")
+                    file = exp.get("file", "")
+                    nombres_exp.append(name)
+                    # Comparar con nombre o nombre de archivo (sin extensión)
+                    if (name.lower() == hotkey_name.lower() or 
+                        file.lower().replace(".exp3.json", "") == hotkey_name.lower() or
+                        name.lower().replace("ex_", "") == hotkey_name.lower().replace("ex_", "")):
+                        exp_file = file
+                        break
+                
+                if exp_file:
+                    set_exp_request = {
                         "apiName": "VTubeStudioPublicAPI",
                         "apiVersion": "1.0",
-                        "requestID": "HotkeyTriggerRequest",
-                        "messageType": "HotkeyTriggerRequest",
-                        "data": {"hotkeyID": hotkey_id},
+                        "requestID": "ExpressionActivationRequest",
+                        "messageType": "ExpressionActivationRequest",
+                        "data": {
+                            "expressionFile": exp_file,
+                            "active": True
+                        }
                     }
-                    await self.vts.request(trigger_request)
-                    print(f"DEBUG: Hotkey '{hotkey_name}' activado con éxito.")
+                    await self.vts.request(set_exp_request)
+                    print(f"DEBUG: Expresión '{exp_file}' activada directamente.")
                 else:
-                    disponibles = [
-                        hk.get("name") for hk in hotkey_list if hk.get("name")
-                    ]
-                    print(f"DEBUG: Hotkey '{hotkey_name}' no encontrado.")
-                    if not hotkey_list:
-                        print(
-                            "DEBUG: Lista de Hotkeys VACÍA. "
-                            "Verifica modelo cargado y VTS enfocado."
-                        )
-                    else:
-                        print(f"DEBUG: Hotkeys encontrados en VTS: {disponibles}")
+                    print(f"DEBUG: Tampoco se encontró expresión para '{hotkey_name}'.")
+                    print(f"DEBUG: Expresiones disponibles: {nombres_exp}")
+                    if not hotkey_list and not expressions:
+                        print("DEBUG: [ERROR] El modelo no tiene ni Hotkeys ni Expresiones cargadas.")
+
             except Exception as e:
-                print(f"DEBUG: Error al activar hotkey: {e}")
+                print(f"DEBUG: Excepción en trigger_hotkey: {e}")
 
     async def close(self):
         if self.connected:
