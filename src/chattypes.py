@@ -1,31 +1,12 @@
-from typing import TypeAlias
-
-from openai.types.chat import (
-    ChatCompletionAssistantMessageParam,
-    ChatCompletionFunctionMessageParam,
-    ChatCompletionSystemMessageParam,
-    ChatCompletionToolMessageParam,
-    ChatCompletionUserMessageParam,
-)
-
-ChatCompletionMessage: TypeAlias = (
-    ChatCompletionSystemMessageParam
-    | ChatCompletionUserMessageParam
-    | ChatCompletionAssistantMessageParam
-    | ChatCompletionToolMessageParam
-    | ChatCompletionFunctionMessageParam
-)
+from typing import TypedDict
 
 
-class CustomMessage:
-    author: str
+class ChatCompletionMessage(TypedDict):
+    """Mensaje de chat estilo OpenAI ({"role": ..., "content": ...}).
+
+    Definido localmente para que el stack local (Ollama) no dependa del paquete
+    ``openai``. Solo necesitamos estos dos campos para armar el historial.
+    """
+
+    role: str
     content: str
-    plattform: str
-    answer: bool
-
-    def __init__(self, author: str, content: str, plattform: str) -> None:
-        self.author = author
-        self.content = content
-        self.plattform = plattform
-        self.answer = False
-        pass

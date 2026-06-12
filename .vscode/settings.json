@@ -1,0 +1,27 @@
+{
+  // Usar el intérprete del venv in-project para que Pylance/pyright resuelva
+  // las dependencias (decouple, pyvts, twitchio, etc.) y no marque imports.
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+
+  // Cada linter usa la versión instalada en el venv (la misma que la CLI de
+  // poetry), así VSCode y `poetry run ...` marcan exactamente lo mismo.
+  "pylint.importStrategy": "fromEnvironment",
+  "flake8.importStrategy": "fromEnvironment",
+  "mypy-type-checker.importStrategy": "fromEnvironment",
+  "isort.importStrategy": "fromEnvironment",
+  "black-formatter.importStrategy": "fromEnvironment",
+
+  // mypy lee su config dedicada; el resto toma .flake8 / pyproject.toml solos.
+  "mypy-type-checker.args": ["--config-file=mypy.ini"],
+
+  // Formateo coherente con black + isort.
+  "black-formatter.args": ["--line-length=88"],
+  "[python]": {
+    "editor.defaultFormatter": "ms-python.black-formatter",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    }
+  },
+  "python-envs.defaultEnvManager": "ms-python.python:poetry"
+}

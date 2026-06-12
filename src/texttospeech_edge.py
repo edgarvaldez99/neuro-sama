@@ -1,6 +1,5 @@
-import os
 import time
-import asyncio
+
 import edge_tts
 
 from .generate_audio import play_audio
@@ -28,15 +27,15 @@ class EdgeTTS:
 
         # Configuramos los parámetros de personalización
         communicate = edge_tts.Communicate(
-            text_to_speak, 
-            self.voice, 
-            pitch=self.pitch, 
-            rate=self.rate
+            text_to_speak,
+            self.voice,
+            pitch=self.pitch,
+            rate=self.rate,
         )
-        
+
         try:
             await communicate.save(output_filename)
-            print(f"DEBUG: Audio generado en {output_filename}. Enviando a reproducir...")
+            print(f"DEBUG: Audio generado en {output_filename}. Reproduciendo...")
             await play_audio(output_filename)
         except Exception as e:
             print(f"DEBUG: Error al generar audio con Edge TTS: {e}")
@@ -46,8 +45,12 @@ class EdgeTTS:
 _edge_instance = None
 
 
+# user_question se mantiene por simetría con la interfaz de texttospeech_piper;
+# Edge TTS solo sintetiza la respuesta del bot.
 async def get_speech_by_text(
-    user_question: str, bot_response: str, audio_filename=None
+    user_question: str,  # pylint: disable=unused-argument
+    bot_response: str,
+    audio_filename=None,
 ):
     global _edge_instance
     if _edge_instance is None:

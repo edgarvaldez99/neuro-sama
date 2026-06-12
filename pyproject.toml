@@ -8,39 +8,16 @@ packages = [
     { include = "src" },
 ]
 
+# Dependencias del stack local activo (Ollama + Edge/Piper TTS + VLC + VTS).
 [tool.poetry.dependencies]
 python = "^3.11"
-async-timeout = "^4.0.3"
-asyncio = "^3.4.3"
-beautifulsoup4 = "^4.12.3"
-brotlipy = "^0.7.0"
-google = "^3.0.0"
-google-cloud = "^0.34.0"
-google-cloud-texttospeech = "^2.16.3"
-imageio = "^2.34.0"
-networkx = "^3.3"
-nltk = "^3.8.1"
-numpy = "^1.26.4"
-openai = "^1.17.1"
-opencv-python = "^4.9.0.80"
-pillow = "^10.3.0"
 python-decouple = "^3.8"
 python-vlc = "^3.0.20123"
-pywavelets = "^1.6.0"
-scipy = "^1.13.0"
-soupsieve = "^2.5"
-tifffile = "^2024.2.12"
 twitchio = "^2.9.1"
 websockets = "^12.0"
-setuptools-rust = "^1.9.0"
-cartesia = "^1.0.8"
-transformers = "^4.45.1"
-torch = "^2.4.1"
 pyvts = "^0.3.3"
 requests = "^2.34.2"
 piper-tts = "^1.4.2"
-sherpa-onnx = "^1.13.2"
-proto-plus = "^1.28.0"
 edge-tts = "^7.2.8"
 
 [tool.poetry.group.dev.dependencies]
@@ -51,11 +28,54 @@ isort = "^5.13.2"
 mypy = "^1.9.0"
 safety = "^3.1.0"
 types-requests = "^2.31.0.20240406"
+pylint = "^4.0.5"
+pyright = "^1.1.410"
 
 [tool.isort]
+profile = "black"
+line_length = 88
 force_grid_wrap = 0
 include_trailing_comma = true
 multi_line_output = 3
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+# Pylint comparte la misma longitud de línea que black/flake8 (88) y desactiva
+# las reglas que chocan con las convenciones del proyecto (sin docstrings
+# obligatorios, captura amplia de excepciones intencional, etc.) para que lo que
+# marca la CLI coincida con lo que marca VSCode.
+[tool.pylint.main]
+py-version = "3.11"
+ignore = ["__pycache__"]
+
+[tool.pylint.format]
+max-line-length = 88
+
+[tool.pylint.basic]
+# Singletons privados a nivel de módulo (cache de instancia): pylint los trata
+# como constantes y pediría MAYÚSCULAS; acá son variables reasignables válidas.
+good-names = ["_vts_instance", "_edge_instance", "_piper_instance"]
+
+[tool.pylint."messages control"]
+disable = [
+    "missing-module-docstring",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "broad-exception-caught",
+    "too-few-public-methods",
+    "too-many-arguments",
+    "too-many-positional-arguments",
+    "too-many-locals",
+    "too-many-branches",
+    "too-many-statements",
+    "too-many-instance-attributes",
+    "fixme",
+    "duplicate-code",
+    "logging-fstring-interpolation",
+    "global-statement",
+]
 
 [build-system]
 requires = ["poetry-core"]

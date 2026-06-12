@@ -8,28 +8,39 @@ from .chat_ollama import ollama_completion
 from .chattypes import ChatCompletionMessage
 from .credentials import BOT_NAME, TWITCH_CHANNEL, TWITCH_TOKEN
 from .filter_message import check_and_filter_user_message
-from .texttospeech_edge import get_speech_by_text
+from .tts import get_speech_by_text
 from .utils import open_file, strip_cjk
-from .vts_controller import EMOTION_TO_HOTKEY, get_vts_instance
-from .websocket import open_websocket
+from .vts_controller import get_vts_instance
 
 CONVERSATION_LIMIT = 20
+# Máximo de mensajes en espera. Si se llena (raid/spam), descartamos los nuevos
+# para no responder con minutos de retraso a mensajes viejos.
+MESSAGE_QUEUE_MAXSIZE = 20
 
 
 class Bot(commands.Bot):
-    conversation: List[ChatCompletionMessage] = list()
+    conversation: List[ChatCompletionMessage] = []
 
-    def __init__(self, speaker_bot=False, speaker_alias="Default"):
+    def __init__(self):
         self.system_prompt = open_file("prompt_chat.txt")
-        self.speaker_bot = speaker_bot
-        self.speaker_alias = speaker_alias
-        self.message_queue = asyncio.Queue()
+        self.message_queue = asyncio.Queue(maxsize=MESSAGE_QUEUE_MAXSIZE)
         self.worker_started = False
+        # Referencias fuertes a tareas en segundo plano. El event loop solo
+        # guarda referencias débiles, así que sin esto el GC podría recolectar
+        # la tarea antes de que termine.
+        self._background_tasks = set()
         super().__init__(
             token=TWITCH_TOKEN,
             prefix="!",
             initial_channels=[TWITCH_CHANNEL],
         )
+
+    def _spawn_background(self, coro):
+        """Lanza una corrutina en segundo plano conservando su referencia."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     async def message_worker(self):
         """Procesa los mensajes de la cola uno por uno secuencialmente"""
@@ -46,23 +57,27 @@ class Bot(commands.Bot):
         print(f"Logged in as | {self.nick}")
         # Iniciar el procesador de mensajes solo cuando el loop esté corriendo
         if not self.worker_started:
-            asyncio.create_task(self.message_worker())
+            self._spawn_background(self.message_worker())
             self.worker_started = True
 
     async def event_message(self, message):
         if message.echo:
             return
 
-        # Poner el mensaje en la cola en lugar de procesarlo directamente
-        await self.message_queue.put(message)
+        # Encolar sin bloquear; si la cola está llena, descartar el mensaje
+        try:
+            self.message_queue.put_nowait(message)
+        except asyncio.QueueFull:
+            print("DEBUG: Cola llena, mensaje descartado.")
 
     async def process_message(self, message):
         if check_and_filter_user_message(message):
             return
 
-        msg = message.content
+        # Preservamos el texto en UTF-8: el bot es en español y necesita
+        # los acentos y la ñ para entender bien al chat.
+        user_question = message.content.strip()
         user = message.author.name
-        user_question = msg.encode(encoding="ASCII", errors="ignore").decode()
         print("------------------------------------------------------")
         print(f"{user} say: {user_question}")
 
@@ -72,6 +87,12 @@ class Bot(commands.Bot):
             self.system_prompt,
             Bot.conversation + [{"role": "user", "content": user_question}],
         )
+
+        # Si Ollama falló (None), no respondemos nada por TTS
+        if raw_response is None:
+            print("DEBUG: Sin respuesta de Ollama, se omite el mensaje.")
+            await self.handle_commands(message)
+            return
 
         # Parsear JSON de Ollama
         try:
@@ -95,17 +116,12 @@ class Bot(commands.Bot):
         if len(Bot.conversation) > CONVERSATION_LIMIT:
             Bot.conversation = Bot.conversation[2:]
 
-        # Activar Hotkey en VTube Studio si la emoción está mapeada
-        if emotion in EMOTION_TO_HOTKEY:
-            vts = await get_vts_instance()
-            hotkey_name = EMOTION_TO_HOTKEY[emotion]
-            # No esperamos (await) para no retrasar el audio
-            asyncio.create_task(vts.trigger_hotkey(hotkey_name))
+        # Activar Hotkey de emoción en VTube Studio (resuelto por modelo)
+        vts = await get_vts_instance()
+        # No esperamos (await) para no retrasar el audio
+        self._spawn_background(vts.trigger_emotion(emotion))
 
-        if self.speaker_bot:
-            await self.send_to_speaker_bot(bot_response)
-        else:
-            await get_speech_by_text(user_question, bot_response)
+        await get_speech_by_text(user_question, bot_response)
 
         await self.handle_commands(message)
 
@@ -119,12 +135,3 @@ class Bot(commands.Bot):
         # Send a hello back!
         # Sending a reply back to the channel is easy... Below is an example.
         await ctx.send(f"Hello {ctx.author.name}!")
-
-    async def send_to_speaker_bot(self, message: str, verbose=False) -> None:
-        """
-        Sends message to speaker.bot websocket using standart setup
-        @param message: the message you want to have spoken
-        @param verbose: set to true if debugging info is wanted
-        """
-
-        await open_websocket(self.speaker_alias, message, verbose)

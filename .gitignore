@@ -1,6 +1,7 @@
 chat_exchange.py
-*.json
 __pycache__/
+.mypy_cache/
+.idea/
 logs/*
 audio.mp3
 subtitle.txt
@@ -8,3 +9,15 @@ subtitle.txt
 !.env.example
 .venv
 audio_*.wav
+audio_*.mp3
+
+# Secretos / tokens (no versionar)
+vts_token.txt
+
+# Generado por modelo en cada conexión a VTS (varía entre instancias)
+emotion_hotkeys.json
+
+# Modelos (binarios grandes: descargar aparte, no versionar)
+models/
+*.onnx
+*.onnx.json

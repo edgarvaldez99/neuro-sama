@@ -27,9 +27,10 @@ def clean_text_for_tts(text: str) -> str:
     Limpia el texto para que el TTS no lea emojis ni símbolos raros literalmente.
     Mantiene puntuación básica (. , ! ?) para la entonación.
     """
-    # 1. Eliminar Emojis y caracteres especiales de Unicode
-    # Rango de emojis comunes y símbolos pictográficos
-    text = re.sub(r"[^\x00-\x7F\xc0-\xff]+", "", text)
+    # 1. Eliminar Emojis y caracteres especiales de Unicode.
+    # Conservamos ASCII, los signos de apertura españoles (¡ ¿) y las
+    # vocales acentuadas / ñ (rango Latin-1 À-ÿ).
+    text = re.sub(r"[^\x00-\x7F\xa1\xbf\xc0-\xff]+", "", text)
 
     # 2. Eliminar símbolos que a veces se leen literalmente
     # Mantener: a-z, A-Z, 0-9, áéíóúüñÁÉÍÓÚÜÑ y puntuación básica
