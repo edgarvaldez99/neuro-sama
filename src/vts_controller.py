@@ -9,6 +9,10 @@ from decouple import config as environ  # type: ignore
 # puerto está ocupado (p.ej. Docker/OpenKM), configurá otro en .env: VTS_PORT=8002
 VTS_PORT = int(environ("VTS_PORT", default=8001))
 
+# Segundos tras los que la expresión vuelve a neutral, para que el personaje no
+# se quede "pegado" en una emoción. Configurable en .env (EMOTION_RESET_SECONDS).
+EMOTION_RESET_SECONDS = float(environ("EMOTION_RESET_SECONDS", default=5.0))
+
 # Palabras clave para mapear cada emoción al hotkey del modelo según su nombre.
 # Como cada modelo de VTube Studio usa sus propios nombres de hotkey, el mapeo se
 # resuelve en cada conexión buscando estas palabras dentro de los nombres reales.
@@ -62,6 +66,9 @@ class VTSController:
         # Mapeo emoción -> nombre de hotkey, resuelto dinámicamente por modelo
         self._emotion_map: dict = {}
         self.current_model: str = ""
+        # Tarea pendiente que devuelve la expresión a neutral (se cancela si
+        # llega una emoción nueva antes de tiempo).
+        self._reset_task = None
 
     async def _authenticate(self) -> bool:
         """
@@ -201,7 +208,40 @@ class VTSController:
         if not hotkey_name:
             print(f"DEBUG: Emoción '{emotion}' sin hotkey mapeado, se omite.")
             return
+
+        # Una emoción nueva manda: cancelamos el retorno a neutral pendiente
+        # (si lo había) para reiniciar el contador desde cero.
+        self._cancel_neutral_reset()
         await self.trigger_hotkey(hotkey_name)
+
+        # Si la emoción no es ya neutral, programamos la vuelta a neutral para
+        # que el personaje no se quede pegado en la expresión.
+        if emotion != "neutral":
+            self._schedule_neutral_reset()
+
+    def _cancel_neutral_reset(self):
+        """Cancela el retorno a neutral pendiente, si existe."""
+        if self._reset_task and not self._reset_task.done():
+            self._reset_task.cancel()
+        self._reset_task = None
+
+    def _schedule_neutral_reset(self):
+        """Programa la vuelta a la expresión neutral tras EMOTION_RESET_SECONDS."""
+
+        async def _back_to_neutral():
+            try:
+                await asyncio.sleep(EMOTION_RESET_SECONDS)
+                neutral = self._emotion_map.get("neutral")
+                if neutral:
+                    await self.trigger_hotkey(neutral)
+                    print("DEBUG: Expresión devuelta a neutral.")
+            except asyncio.CancelledError:
+                # Llegó otra emoción antes de tiempo; no hacemos nada.
+                pass
+
+        # Guardamos la referencia fuerte: el event loop solo tiene refs débiles,
+        # así que sin esto el GC podría matar la tarea antes de que dispare.
+        self._reset_task = asyncio.create_task(_back_to_neutral())
 
     async def trigger_hotkey(self, hotkey_name: str):
         if not self.connected:

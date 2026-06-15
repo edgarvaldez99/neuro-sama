@@ -7,10 +7,24 @@ from vlc import MediaPlayer, State  # type: ignore
 _AUDIO_HISTORY_LIMIT = 3
 _audio_history = []
 
-# Referencias fuertes a las tareas de limpieza en segundo plano. El event loop
+# Referencias fuertes a las tareas en segundo plano. El event loop
 # solo guarda referencias débiles, así que sin esto el GC podría recolectar la
 # tarea antes de que termine. Se descarta sola al completarse.
 _background_tasks: set = set()
+
+
+def clean_audio_folder():
+    """Borra todos los archivos de la carpeta 'audios' al iniciar el bot."""
+    dir_path = os.environ.get("BASE_DIR_PATH", os.getcwd())
+    audio_dir = os.path.join(dir_path, "audios")
+    if os.path.exists(audio_dir):
+        for file in os.listdir(audio_dir):
+            if file.endswith(".mp3") or file.endswith(".wav"):
+                try:
+                    os.remove(os.path.join(audio_dir, file))
+                except Exception as e:
+                    print(f"DEBUG: No se pudo borrar {file} al inicio: {e}")
+        print("DEBUG: Carpeta 'audios' limpiada para la nueva sesión.")
 
 
 async def _remove_with_retry(path: str, attempts: int = 15) -> None:
@@ -28,10 +42,14 @@ async def _remove_with_retry(path: str, attempts: int = 15) -> None:
 
 
 async def play_audio(audio_filename: str):
-    # El motor de TTS ya generó el archivo; acá solo lo reproducimos.
-    dir_path = os.environ.get("BASE_DIR_PATH", os.getcwd())
-    # Usar rutas normales de Windows
-    audio_file_path = os.path.normpath(os.path.join(dir_path, audio_filename))
+    # Si la ruta ya es absoluta, la dejamos como está, si no, la unimos al base_dir
+    if os.path.isabs(audio_filename):
+        audio_file_path = audio_filename
+    else:
+        dir_path = os.environ.get("BASE_DIR_PATH", os.getcwd())
+        audio_file_path = os.path.join(dir_path, audio_filename)
+
+    audio_file_path = os.path.normpath(audio_file_path)
 
     if not os.path.exists(audio_file_path):
         print(f"DEBUG: ERROR - El archivo de audio no existe: {audio_file_path}")

@@ -35,7 +35,8 @@ class PiperTTS:
 
         if output_filename is None:
             timestamp = int(time.time() * 1000)
-            output_filename = f"audio_{timestamp}.wav"
+            dir_path = os.environ.get("BASE_DIR_PATH", os.getcwd())
+            output_filename = os.path.join(dir_path, "audios", f"audio_{timestamp}.wav")
 
         print(f"DEBUG: Generando audio para: {text[:30]}...")
         # Limpiar texto para el TTS (quitar emojis y símbolos)

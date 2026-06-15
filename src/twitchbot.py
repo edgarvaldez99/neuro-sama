@@ -13,9 +13,20 @@ from .utils import open_file, strip_cjk
 from .vts_controller import get_vts_instance
 
 CONVERSATION_LIMIT = 20
-# Máximo de mensajes en espera. Si se llena (raid/spam), descartamos los nuevos
-# para no responder con minutos de retraso a mensajes viejos.
 MESSAGE_QUEUE_MAXSIZE = 20
+
+
+class FakeAuthor:
+    def __init__(self, name):
+        self.name = name
+
+
+class FakeMessage:
+    def __init__(self, content, author_name):
+        self.content = content
+        self.author = FakeAuthor(author_name)
+        self.echo = False
+        self.tags = {}  # Atributos mínimos para compatibilidad con twitchio
 
 
 class Bot(commands.Bot):
@@ -25,6 +36,7 @@ class Bot(commands.Bot):
         self.system_prompt = open_file("prompt_chat.txt")
         self.message_queue = asyncio.Queue(maxsize=MESSAGE_QUEUE_MAXSIZE)
         self.worker_started = False
+        self.is_speaking = False  # Flag para indicar si el bot está hablando
         # Referencias fuertes a tareas en segundo plano. El event loop solo
         # guarda referencias débiles, así que sin esto el GC podría recolectar
         # la tarea antes de que termine.
@@ -74,6 +86,17 @@ class Bot(commands.Bot):
         if check_and_filter_user_message(message):
             return
 
+        # Silenciamos el micro durante TODO el procesamiento, no solo la
+        # reproducción: mientras Ollama piensa y mientras suena el audio, el STT
+        # ignora la entrada para no captar la propia voz del bot ni al streamer
+        # encimándose. Se restaura en el finally pase lo que pase.
+        self.is_speaking = True
+        try:
+            await self._generate_and_speak(message)
+        finally:
+            self.is_speaking = False
+
+    async def _generate_and_speak(self, message):
         # Preservamos el texto en UTF-8: el bot es en español y necesita
         # los acentos y la ñ para entender bien al chat.
         user_question = message.content.strip()
@@ -91,7 +114,8 @@ class Bot(commands.Bot):
         # Si Ollama falló (None), no respondemos nada por TTS
         if raw_response is None:
             print("DEBUG: Sin respuesta de Ollama, se omite el mensaje.")
-            await self.handle_commands(message)
+            if not isinstance(message, FakeMessage):
+                await self.handle_commands(message)
             return
 
         # Parsear JSON de Ollama
@@ -123,7 +147,17 @@ class Bot(commands.Bot):
 
         await get_speech_by_text(user_question, bot_response)
 
-        await self.handle_commands(message)
+        # Solo intentar procesar comandos de Twitch si el mensaje es real
+        if not isinstance(message, FakeMessage):
+            await self.handle_commands(message)
+
+    async def inject_mic_message(self, text: str):
+        """Inyecta un mensaje de voz en la cola del bot."""
+        message = FakeMessage(content=text, author_name="Streamer")
+        try:
+            self.message_queue.put_nowait(message)
+        except asyncio.QueueFull:
+            print("DEBUG: Cola llena, mensaje de voz descartado.")
 
     @commands.command(name="hola", aliases=["op", "haupei", "alo", "buen día"])
     async def hello(self, ctx: commands.Context):

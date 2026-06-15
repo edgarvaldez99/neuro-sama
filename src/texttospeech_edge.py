@@ -1,3 +1,4 @@
+import os
 import time
 
 import edge_tts
@@ -17,15 +18,23 @@ class EdgeTTS:
         self.rate = rate
 
     async def generate_speech(self, text: str, output_filename=None):
+        dir_path = os.environ.get("BASE_DIR_PATH", os.getcwd())
+        audio_dir = os.path.join(dir_path, "audios")
+
+        # Asegurar que la carpeta existe
+        if not os.path.exists(audio_dir):
+            os.makedirs(audio_dir, exist_ok=True)
+
         if output_filename is None:
             timestamp = int(time.time() * 1000)
-            output_filename = f"audio_{timestamp}.mp3"
+            output_filename = os.path.join(audio_dir, f"audio_{timestamp}.mp3")
+
+        # Normalizar ruta para Windows
+        output_filename = os.path.abspath(output_filename)
 
         print(f"DEBUG: Generando audio con Edge TTS para: {text[:30]}...")
-        # Limpiar texto para el TTS (quitar emojis y símbolos)
         text_to_speak = clean_text_for_tts(text)
 
-        # Configuramos los parámetros de personalización
         communicate = edge_tts.Communicate(
             text_to_speak,
             self.voice,
@@ -35,8 +44,14 @@ class EdgeTTS:
 
         try:
             await communicate.save(output_filename)
-            print(f"DEBUG: Audio generado en {output_filename}. Reproduciendo...")
-            await play_audio(output_filename)
+
+            # Verificar si el archivo se generó correctamente
+            if os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
+                size = os.path.getsize(output_filename)
+                print(f"DEBUG: Audio generado con éxito ({size} bytes).")
+                await play_audio(output_filename)
+            else:
+                print(f"DEBUG: ERROR - El audio en {output_filename} está vacío.")
         except Exception as e:
             print(f"DEBUG: Error al generar audio con Edge TTS: {e}")
 
