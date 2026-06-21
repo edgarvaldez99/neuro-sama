@@ -14,6 +14,9 @@ audio_*.mp3
 # Secretos / tokens (no versionar)
 vts_token.txt
 
+# Memoria persistente de Mai-chan (datos locales: viewers, agenda, resúmenes)
+maichan_memory.db
+
 # Generado por modelo en cada conexión a VTS (varía entre instancias)
 emotion_hotkeys.json
 

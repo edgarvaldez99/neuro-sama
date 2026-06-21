@@ -1,24 +1,6 @@
-<!-- Improved compatibility of back to top link: See: https://github.com/othneildrew/Best-README-Template/pull/73 -->
-
 <a name="readme-top"></a>
 
-<!--
-*** Thanks for checking out the Best-README-Template. If you have a suggestion
-*** that would make this better, please fork the repo and create a pull request
-*** or simply open an issue with the tag "enhancement".
-*** Don't forget to give the project a star!
-*** Thanks again! Now go create something AMAZING! :D
--->
-
 <!-- PROJECT SHIELDS -->
-<!--
-*** I'm using markdown "reference style" links for readability.
-*** Reference links are enclosed in brackets [ ] instead of parentheses ( ).
-*** See the bottom of this document for the declaration of the reference variables
-*** for contributors-url, forks-url, etc. This is an optional, concise syntax you may use.
-*** https://www.markdownguide.org/basic-syntax/#reference-style-links
--->
-
 [![Forks][forks-shield]][forks-url]
 [![Stargazers][stars-shield]][stars-url]
 [![Issues][issues-shield]][issues-url]
@@ -26,156 +8,236 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-  <a href="https://github.com/adi-panda/Kuebiko">
-    <img src="https://i.imgur.com/kgXfiBi.png" alt="Logo" width="200" height="200">
-  </a>
-
-<h3 align="center">Kuebiko</h3>
-    WARNING: This doc is out of date, while it still applies to the legacy mode, I recommend using the Streamer.bot and Speaker.bot Mode instead. If needed a Tutorial will be added, however until then, there will be dragons.
-    You will need to create a custom system prompt, it is recommended to read up on prompt engineering and trying out a lot.
+  <h3 align="center">Mai-chan — AI VTuber for Twitch</h3>
 
   <p align="center">
-    A Twitch Chat Bot that reads twitch chat and creates a text to speech response using google could api and openai's GPT-3 text completion model.
+    "Neuro-Sama"-style AI VTuber bot, <strong>100% local and free</strong>.
+    It reads Twitch chat and the streamer's mic (and optionally the screen),
+    generates an in-character reply with a local LLM, synthesizes it into speech,
+    drives a VTube Studio avatar's emotion, and plays the audio back.
     <br />
-    <a href="https://github.com/adi-panda/Kuebiko"><strong>Explore the docs »</strong></a>
+    <br />
+    Fork of <a href="https://github.com/adi-panda/Kuebiko">Kuebiko</a>, migrated to a
+    stack with no paid services.
     <br />
     <br />
-    <a href="https://github.com/adi-panda/Kuebiko/">View Demo</a>
-    ·
-    <a href="https://github.com/adi-panda/Kuebiko/issues">Report Bug</a>
-    ·
-    <a href="https://github.com/adi-panda/Kuebiko/issues">Request Feature</a>
+    <strong>🇬🇧 English</strong> · <a href="#mai-chan--ai-vtuber-para-twitch">🇪🇸 Español</a>
   </p>
 </div>
 
 <!-- TABLE OF CONTENTS -->
 <details>
-  <summary>Table of Contents</summary>
+  <summary>Table of contents</summary>
   <ol>
+    <li><a href="#about-the-project">About the project</a></li>
+    <li><a href="#architecture">Architecture</a></li>
     <li>
-      <a href="#about-the-project">About The Project</a>
+      <a href="#getting-started">Getting started</a>
       <ul>
-        <li><a href="#built-with">Built With</a></li>
-      </ul>
-    </li>
-    <li>
-      <a href="#getting-started">Getting Started</a>
-      <ul>
-        <li><a href="#prerequisites">Prerequisites</a></li>
+        <li><a href="#requirements">Requirements</a></li>
         <li><a href="#installation">Installation</a></li>
+        <li><a href="#configuration-env">Configuration (.env)</a></li>
       </ul>
     </li>
-    <li><a href="#usage">Usage</a></li>
-    <li><a href="#roadmap">Roadmap</a></li>
+    <li><a href="#commands-makefile">Commands (Makefile)</a></li>
+    <li><a href="#chat-commands">Chat commands</a></li>
+    <li><a href="#optional-subsystems">Optional subsystems</a></li>
+    <li><a href="#documentation">Documentation</a></li>
     <li><a href="#contributing">Contributing</a></li>
     <li><a href="#license">License</a></li>
-    <li><a href="#contact">Contact</a></li>
-    <li><a href="#acknowledgments">Acknowledgments</a></li>
   </ol>
 </details>
 
 <!-- ABOUT THE PROJECT -->
 
-## YouTube Videl Tutorial !OUTDATED!
+## About the project
 
-[![Product Name Screen Shot][product-screenshot]](https://www.youtube.com/watch?v=EXICATDyYWI&lc=UgzyiL0K3akxPeX9U8F4AaABAgm)
+Mai-chan is a "Neuro-Sama"-style AI VTuber bot. The pipeline is:
 
-This is a project to setup your very own VTuber AI similar to "Neuro-Sama".
+> **Twitch + Microphone (+ Screen)** → **Ollama (local LLM)** → **TTS** → **VTube Studio** → **VLC**
+
+The whole chain runs **locally and at no cost**. The old paid-cloud modules
+(OpenAI, ElevenLabs, Cartesia, Google TTS, Speaker.bot) were removed; the only online
+piece is **Edge TTS**, swappable for **Piper** to go fully offline.
+
+> ℹ️ The project is built **for Windows**: playback needs **VLC installed on the OS**, and
+> STT and vision require an **NVIDIA GPU + CUDA**. Audio is routed into OBS/VTS with a
+> **virtual audio cable** (e.g. VB-Audio Cable).
+
+### Built with
+
+- **Python 3.11** + [Poetry](https://python-poetry.org/)
+- [Ollama](https://ollama.com/) — local LLM (Qwen2.5) and vision VLM (Qwen3-VL)
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — local STT + Silero VAD
+- [Edge TTS](https://github.com/rany2/edge-tts) / [Piper](https://github.com/rhasspy/piper) — speech synthesis
+- [pyvts](https://github.com/Genteki/pyvts) — VTube Studio control
+- [python-vlc](https://pypi.org/project/python-vlc/) — audio playback
+- [twitchio](https://github.com/PythonistaGuild/TwitchIO) — Twitch chat
+- `pycaw` / `pyaudiowpatch` — volume control and loopback capture (Windows)
+- SQLite (stdlib) — episodic memory
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
-### Built With
+## Architecture
 
--   Python
+Up to **four producers** feed **one shared `asyncio.PriorityQueue`**, so all inputs are
+serialized through a single response pipeline (audio never overlaps):
+
+| Producer | Source | Notes |
+|----------|--------|-------|
+| **Chat** | `event_message` | Twitch messages |
+| **Microphone** | `LocalSTT.listen_loop` | Local STT; **always top priority** |
+| **Vision** | `ScreenVision.watch_loop` | Only if `VISION_ENABLED` |
+| **Director** | `director_loop` | Proactive; only if `DIRECTOR_ENABLED` |
+
+- Queue items are `(priority, seq, message)`. The **attention mode**
+  (`VIDEO_FIRST` / `CHAT_FIRST` / `HYBRID`) sets the per-source priority; `seq` gives FIFO
+  on ties. Switch it live with `!mode` (channel owner only).
+- **Chat commands (`!hola`, `!mode`, `!agenda`) do NOT go to the LLM**: they are handled
+  separately and never enter the queue.
+- **`is_speaking`** is the anti-echo flag: while Mai-chan is talking, STT and vision drop
+  their input so she never reacts to her own voice/output.
+- **Two-stage vision:** the VLM only *describes* the frame (objective, cheap) and the
+  personality LLM turns that description into an in-character comment.
+- **Episodic memory** (`src/memory.py`): stdlib SQLite (no server). On start it prepends a
+  *session brief* (recent summaries + today's agenda) to the prompt; on shutdown it
+  generates and saves a one-line summary of the stream.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 <!-- GETTING STARTED -->
 
-## Getting Started
+## Getting started
 
-This is an example of how you may give instructions on setting up your project locally.
-To get a local copy up and running follow these simple example steps.
+### Requirements
 
-### Prerequisites
-
--   VLC MUST BE DOWNLOADED ON YOUR COMPUTER
-
-In order to install the prerequisites you will need to do:
-
--   Install [poetry](https://python-poetry.org/docs/#installation)
--   ```sh
-    poetry install
+- **Windows** (see note above) with **VLC installed** on the system.
+- **NVIDIA GPU + CUDA** (for STT and vision). CUDA DLLs ship via the pip packages
+  `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` (patched onto the PATH in `src/stt_local.py`).
+- **[Ollama](https://ollama.com/)** running with the models pulled.
+  - The default LLM in `.env.example` is `qwen2.5:3b` (fits 6GB GPUs):
+    ```sh
+    ollama pull qwen2.5:3b
     ```
+  - For vision use the **`-instruct`** VLM variant (the plain one is *thinking* and hangs):
+    ```sh
+    ollama pull qwen3-vl:8b-instruct   # prod (RTX 3090); use qwen3-vl:4b-instruct on small GPUs
+    ```
+    > The `qwen3-vl` models need **Ollama >= 0.30**.
+- **[Poetry](https://python-poetry.org/docs/#installation)**.
+- **VTube Studio** open with its API enabled (port `8001` by default).
+- A **virtual audio cable** (VB-Audio Cable) to route audio into OBS/VTS.
 
 ### Installation
 
-1. Get a OpenAI API Key at [OpenAPIKey](https://openai.com/api/)
-2. Get a Twitch API Token at [TwitchToken](https://twitchtokengenerator.com/)
-3. Create a Google Cloud Project with TTS Service enabled and download JSON credentials file. [GoogleCloud](https://cloud.google.com/)
-4. Clone the repo
-    ```sh
-    git clone https://github.com/adi-panda/Kuebiko/
-    ```
-5. Add the Google Cloud JSON file into the project folder.
-6. Rename `.env.example` to `.env` and enter API Keys:
+1. Clone the repo:
+   ```sh
+   git clone https://github.com/edgarvaldez99/neuro-sama.git
+   cd neuro-sama
+   ```
+2. Install dependencies:
+   ```sh
+   poetry install      # or: make install
+   ```
+3. Copy `.env.example` → `.env` and fill in the variables (see below).
+4. Verify the environment before launching:
+   ```sh
+   make check-setup    # or: poetry run python -m src.check_setup
+   ```
+5. Run the bot:
+   ```sh
+   make run            # or: poetry run python main.py
+   ```
 
-    ```sh
-    TWITCH_CHANNEL="You're Twitch Token"
-    TWITCH_TOKEN="Your TWITCH Channel Name"
-    OPENAI_API_KEY="Your OpenAI API Key"
-    GOOGLE_JSON_PATH="Your Google Cloud JSON Path"
-    BOT_NAME="Neuro-Sama"
-    ELEVENLABS_APIKEY="Your ElevenLabs API Key"
-    ELEVENLABS_VOICEID="Your ElevenLabs Voice Id"
-    WEBSOCKET_URL="Your WebSocket Url"
-    ```
+> ⚠️ **Always launch via `main.py`** (or `make run`): it sets `BASE_DIR_PATH=cwd`, which
+> several modules use to resolve paths (`prompt_chat.txt`, `audios/`,
+> `emotion_hotkeys.json`). Running a submodule directly misresolves those paths.
 
-7. Download VTube Studio and use VBAudio Cable to route audio coming from the program.
-8. Add the following script into OBS [CaptionsScript](https://gist.github.com/kkartaltepe/861b02882056b464bfc3e0b329f2f174)
-9. Create a new text source for captions, and set it to read from a file, select the `subtitle.txt` file from the project folder.
-10. In the script options put the name of you're text source.
-11. Set the script in transform options to scale to inner bounds, and adjust the size of the captions.
-12. Enjoy! For more details watch the attatched video.
-13. IN ORDER TO CHANGE THE VOICE OF YOU'RE VTUBER you will need to change the following parameters in main.py
-    Here is a list of [supported voices](https://cloud.google.com/text-to-speech/docs/voices)
+### Configuration (.env)
 
-    ```python
-      voice = texttospeech.VoiceSelectionParams(
-          language_code="en-GB",
-          name= "en-GB-Wavenet-B",
-          ssml_gender=texttospeech.SsmlVoiceGender.MALE,
-      )
-    ```
+Every option is read from `.env` (via `python-decouple`). The minimum required:
 
-14. Run
+```sh
+TWITCH_CHANNEL="your_channel"
+TWITCH_TOKEN="your_twitch_oauth_token"   # https://twitchtokengenerator.com/
+BOT_NAME="Neuro-Sama"
+OLLAMA_MODEL="qwen2.5:3b"
+TTS_ENGINE="edge"                        # "edge" (online) or "piper" (offline)
+```
 
-    ```sh
-    poetry run python main.py
-    ```
+Other config files in the root:
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+- **`prompt_chat.txt`** — character/system prompt. It **must** make the LLM reply in JSON
+  `{"response_text": ..., "emotion": ...}` (the bot calls Ollama in JSON mode and parses it).
+- **`filter.json`** — chat blacklist / ignore-list (`src/filter_message.py`).
 
-<!-- USAGE EXAMPLES -->
-
-## Usage
-
-Use this space to show useful examples of how a project can be used. Additional screenshots, code examples and demos work well in this space. You may also link to more resources.
-
-_For more examples, please refer to the [Documentation](https://example.com)_
+> `.env.example` documents **all** variables of every subsystem (vision, MediaController,
+> attention mode, director). Code defaults target the production machine (RTX 3090); for
+> small GPUs, uncomment the "dev" values.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
-<!-- ROADMAP -->
+## Commands (Makefile)
 
-## Roadmap
+The `Makefile` centralizes day-to-day commands. `make` or `make help` lists everything:
 
--   [ ] Feature 1
--   [ ] Feature 2
--   [ ] Feature 3
-    -   [ ] Nested Feature
+| Command | What it does |
+|---------|--------------|
+| `make install` | Install the local stack dependencies (`poetry install`) |
+| `make format` | Format the code (`isort` + `black`) |
+| `make lint` | Run the 6 quality tools (same as VSCode) |
+| `make check` | Alias of `lint` (checks without modifying files) |
+| `make check-setup` | Environment diagnostics (Ollama, VTS, `.env` variables) |
+| `make run` | Start the bot |
 
-See the [open issues](https://github.com/github_username/repo_name/issues) for a full list of proposed features (and known issues).
+`make lint` runs: **flake8**, **isort --check**, **black --check**, **mypy**, **pylint**
+and **pyright**. pylint is expected to stay at **10/10** (annotate intentional warnings
+inline). Line length: **88**.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+## Chat commands
+
+| Command | Who | What it does |
+|---------|-----|--------------|
+| `!hola` (aliases: `!op`, `!alo`, `!haupei`, `!buen día`) | Everyone | Greeting |
+| `!mode video\|chat\|hybrid` | Owner | Switch attention mode live |
+| `!agenda` | Owner | List today's plan |
+| `!agenda <text>` | Owner | Add a task/idea to the agenda |
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+## Optional subsystems
+
+All are **off by default** and enabled from `.env`:
+
+- **Vision** (`VISION_ENABLED`) — Mai-chan "sees" the screen and reacts. Uses a VLM
+  (`qwen3-vl`) to describe the frame, with scene-difference anti-spam. Standalone prototype:
+  `poetry run python -m src.screen_vision`.
+- **MediaController** (`MEDIA_CONTROL_ENABLED`) — keeps the video audio from talking over
+  Mai-chan: it **pauses** (media key) or **ducks** the volume (`pycaw`, per-app) while she
+  speaks. Level 1 only (simulated inputs, no autonomous PC control).
+- **Loopback VAD** (`MEDIA_VAD_ENABLED`) — instead of assuming, it **detects live** whether
+  the video has speech: captures system audio (WASAPI loopback via `pyaudiowpatch`) and runs
+  **Silero VAD** (reused from faster-whisper). So music/SFX don't trigger cuts. Degrades to
+  the `MEDIA_ASSUME_DIALOGO` heuristic if the dep/device is missing.
+- **Attention mode** (`ATTENTION_MODE`) — `VIDEO_FIRST` / `CHAT_FIRST` / `HYBRID`.
+- **Director** (`DIRECTOR_ENABLED`) — when there's silence, Mai-chan speaks on her own:
+  resumes today's agenda or drops a comment, so the stream isn't dead air.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+## Documentation
+
+Detailed design and direction docs live in `docs/`:
+
+- **`docs/plan_vision_general.md`** — general vision/reaction plan.
+- **`docs/PLAN_NEURO_V2.md`** — target v2 rewrite design (Qwen3-Omni, paid-message auctions
+  in the queue, Discord voice, Silero VAD barge-in). *Design, not current code.*
+- **`docs/REPORTE_MEJORAS_STT_AUDIO.md`** — STT/audio tuning notes.
+
+> The project is governed by `CLAUDE.md` (architecture instructions and conventions). The
+> original upstream README is out of date: trust the code and `docs/`.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -183,15 +245,12 @@ See the [open issues](https://github.com/github_username/repo_name/issues) for a
 
 ## Contributing
 
-Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
+Contributions are welcome. Before opening a PR, make sure `make lint` passes.
 
-If you have a suggestion that would make this better, please fork the repo and create a pull request. You can also simply open an issue with the tag "enhancement".
-Don't forget to give the project a star! Thanks again!
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
+1. Fork the project
+2. Create your branch (`git checkout -b feature/MyFeature`)
+3. Commit your changes (`git commit -m 'Add MyFeature'`)
+4. Push the branch (`git push origin feature/MyFeature`)
 5. Open a Pull Request
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -204,60 +263,287 @@ Distributed under the MIT License.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
-<!-- CONTACT -->
+## Acknowledgments
 
-## Contact
-
-[@adi_panda](https://twitter.com/adi_panda) - hello@adipanda.me
-[@truecaesarlp](https://twitter.com/TrueCaesarLP) - realcaesarlp@gmail.com
-
-Project Link: [You are here](https://github.com/adi-panda/Kuebiko/)
+- [Kuebiko](https://github.com/adi-panda/Kuebiko) — the original project this is a fork of.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
-<!-- ACKNOWLEDGMENTS -->
+---
+---
 
-## Acknowledgments
+<a name="mai-chan--ai-vtuber-para-twitch"></a>
 
--   []()
--   []()
--   []()
+<!-- PROJECT LOGO -->
+<br />
+<div align="center">
+  <h3 align="center">Mai-chan — AI VTuber para Twitch</h3>
+
+  <p align="center">
+    Bot AI-VTuber estilo "Neuro-Sama", <strong>100% local y gratis</strong>.
+    Lee el chat de Twitch y el micro del streamer (y opcionalmente la pantalla),
+    genera una respuesta en personaje con un LLM local, la sintetiza en voz,
+    mueve la emoción de un avatar de VTube Studio y reproduce el audio.
+    <br />
+    <br />
+    Fork de <a href="https://github.com/adi-panda/Kuebiko">Kuebiko</a>, migrado a
+    un stack sin servicios pagos.
+    <br />
+    <br />
+    <a href="#readme-top">🇬🇧 English</a> · <strong>🇪🇸 Español</strong>
+  </p>
+</div>
+
+<!-- TABLE OF CONTENTS -->
+<details>
+  <summary>Tabla de contenidos</summary>
+  <ol>
+    <li><a href="#sobre-el-proyecto">Sobre el proyecto</a></li>
+    <li><a href="#arquitectura">Arquitectura</a></li>
+    <li>
+      <a href="#cómo-empezar">Cómo empezar</a>
+      <ul>
+        <li><a href="#requisitos">Requisitos</a></li>
+        <li><a href="#instalación">Instalación</a></li>
+        <li><a href="#configuración-env">Configuración (.env)</a></li>
+      </ul>
+    </li>
+    <li><a href="#comandos-makefile">Comandos (Makefile)</a></li>
+    <li><a href="#comandos-del-chat">Comandos del chat</a></li>
+    <li><a href="#subsistemas-opcionales">Subsistemas opcionales</a></li>
+    <li><a href="#documentación">Documentación</a></li>
+    <li><a href="#contribuir">Contribuir</a></li>
+    <li><a href="#licencia">Licencia</a></li>
+  </ol>
+</details>
+
+<!-- ABOUT THE PROJECT -->
+
+## Sobre el proyecto
+
+Mai-chan es un bot AI-VTuber al estilo "Neuro-Sama". El pipeline es:
+
+> **Twitch + Micrófono (+ Pantalla)** → **Ollama (LLM local)** → **TTS** → **VTube Studio** → **VLC**
+
+Toda la cadena corre **local y sin costos**. Los antiguos módulos de nube pagos
+(OpenAI, ElevenLabs, Cartesia, Google TTS, Speaker.bot) fueron eliminados; la única
+pieza online es **Edge TTS**, intercambiable por **Piper** para quedar 100% offline.
+
+> ℹ️ El proyecto está pensado **para Windows**: la reproducción necesita **VLC instalado
+> en el sistema**, y el STT y la visión requieren **GPU NVIDIA + CUDA**. El audio se
+> rutea hacia OBS/VTS con un **cable de audio virtual** (ej: VB-Audio Cable).
+
+### Construido con
+
+- **Python 3.11** + [Poetry](https://python-poetry.org/)
+- [Ollama](https://ollama.com/) — LLM local (Qwen2.5) y VLM de visión (Qwen3-VL)
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — STT local + Silero VAD
+- [Edge TTS](https://github.com/rany2/edge-tts) / [Piper](https://github.com/rhasspy/piper) — síntesis de voz
+- [pyvts](https://github.com/Genteki/pyvts) — control de VTube Studio
+- [python-vlc](https://pypi.org/project/python-vlc/) — reproducción de audio
+- [twitchio](https://github.com/PythonistaGuild/TwitchIO) — chat de Twitch
+- `pycaw` / `pyaudiowpatch` — control de volumen y captura de loopback (Windows)
+- SQLite (stdlib) — memoria episódica
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+## Arquitectura
+
+Hasta **cuatro productores** alimentan **una única `asyncio.PriorityQueue`** compartida,
+de modo que todas las entradas se serializan por un solo pipeline de respuesta (el audio
+nunca se solapa):
+
+| Productor | Origen | Notas |
+|-----------|--------|-------|
+| **Chat** | `event_message` | Mensajes de Twitch |
+| **Micrófono** | `LocalSTT.listen_loop` | STT local; **siempre prioridad máxima** |
+| **Visión** | `ScreenVision.watch_loop` | Solo si `VISION_ENABLED` |
+| **Director** | `director_loop` | Proactivo; solo si `DIRECTOR_ENABLED` |
+
+- Los ítems de la cola son `(prioridad, seq, mensaje)`. El **modo de atención**
+  (`VIDEO_FIRST` / `CHAT_FIRST` / `HYBRID`) define la prioridad por fuente; `seq` da FIFO
+  ante empates. Se cambia en vivo con `!mode` (solo el dueño del canal).
+- Los **comandos del chat (`!hola`, `!mode`, `!agenda`) NO van al LLM**: se atienden
+  aparte y no entran a la cola.
+- **`is_speaking`** es el flag anti-eco: mientras Mai-chan habla, el STT y la visión
+  descartan su entrada para que no reaccione a su propia voz/salida.
+- **Visión en dos etapas:** el VLM solo *describe* el frame (objetivo, barato) y el LLM
+  de personalidad convierte esa descripción en un comentario en personaje.
+- **Memoria episódica** (`src/memory.py`): SQLite de la stdlib (sin servidor). Al arrancar
+  antepone un *brief de sesión* (resúmenes recientes + agenda del día) al prompt; al cerrar
+  genera y guarda un resumen de una línea del stream.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+<!-- GETTING STARTED -->
+
+## Cómo empezar
+
+### Requisitos
+
+- **Windows** (ver nota arriba) con **VLC instalado** en el sistema.
+- **GPU NVIDIA + CUDA** (para STT y visión). Las DLLs de CUDA llegan vía los paquetes pip
+  `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` (se parchean al PATH en `src/stt_local.py`).
+- **[Ollama](https://ollama.com/)** corriendo y con los modelos descargados.
+  - El LLM por defecto del `.env.example` es `qwen2.5:3b` (entra en GPUs de 6GB):
+    ```sh
+    ollama pull qwen2.5:3b
+    ```
+  - Para visión usá la variante **`-instruct`** del VLM (la genérica es *thinking* y se cuelga):
+    ```sh
+    ollama pull qwen3-vl:8b-instruct   # prod (RTX 3090); usar qwen3-vl:4b-instruct en GPUs chicas
+    ```
+    > Los modelos `qwen3-vl` necesitan **Ollama >= 0.30**.
+- **[Poetry](https://python-poetry.org/docs/#installation)**.
+- **VTube Studio** abierto con su API habilitada (puerto `8001` por defecto).
+- Un **cable de audio virtual** (VB-Audio Cable) para rutear el audio hacia OBS/VTS.
+
+### Instalación
+
+1. Cloná el repo:
+   ```sh
+   git clone https://github.com/edgarvaldez99/neuro-sama.git
+   cd neuro-sama
+   ```
+2. Instalá las dependencias:
+   ```sh
+   poetry install      # o: make install
+   ```
+3. Copiá `.env.example` → `.env` y completá las variables (ver abajo).
+4. Verificá el entorno antes de arrancar:
+   ```sh
+   make check-setup    # o: poetry run python -m src.check_setup
+   ```
+5. Arrancá el bot:
+   ```sh
+   make run            # o: poetry run python main.py
+   ```
+
+> ⚠️ **Arrancá siempre con `main.py`** (o `make run`): éste fija `BASE_DIR_PATH=cwd`, que
+> varios módulos usan para resolver rutas (`prompt_chat.txt`, `audios/`,
+> `emotion_hotkeys.json`). Correr un submódulo directo desmapea esas rutas.
+
+### Configuración (.env)
+
+Todas las opciones se leen del `.env` (vía `python-decouple`). Lo mínimo requerido:
+
+```sh
+TWITCH_CHANNEL="tu_canal"
+TWITCH_TOKEN="tu_twitch_oauth_token"   # https://twitchtokengenerator.com/
+BOT_NAME="Neuro-Sama"
+OLLAMA_MODEL="qwen2.5:3b"
+TTS_ENGINE="edge"                      # "edge" (online) o "piper" (offline)
+```
+
+Otros archivos de configuración en la raíz:
+
+- **`prompt_chat.txt`** — prompt de personaje/sistema. **Debe** hacer que el LLM responda
+  en JSON `{"response_text": ..., "emotion": ...}` (el bot llama a Ollama en modo JSON y
+  parsea eso).
+- **`filter.json`** — blacklist / ignore-list del chat (`src/filter_message.py`).
+
+> El `.env.example` documenta **todas** las variables de cada subsistema (visión,
+> MediaController, modo de atención, director). Los defaults del código apuntan a la
+> máquina de producción (RTX 3090); para GPUs chicas, descomentá los valores "dev".
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+## Comandos (Makefile)
+
+El `Makefile` centraliza los comandos del día a día. `make` o `make help` lista todo:
+
+| Comando | Qué hace |
+|---------|----------|
+| `make install` | Instala las dependencias del stack local (`poetry install`) |
+| `make format` | Formatea el código (`isort` + `black`) |
+| `make lint` | Corre las 6 herramientas de calidad (igual que VSCode) |
+| `make check` | Alias de `lint` (verifica sin modificar archivos) |
+| `make check-setup` | Diagnóstico del entorno (Ollama, VTS, variables `.env`) |
+| `make run` | Arranca el bot |
+
+`make lint` ejecuta: **flake8**, **isort --check**, **black --check**, **mypy**,
+**pylint** y **pyright**. Se espera mantener pylint en **10/10** (anotar inline las
+advertencias intencionales). Longitud de línea: **88**.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+## Comandos del chat
+
+| Comando | Quién | Qué hace |
+|---------|-------|----------|
+| `!hola` (alias: `!op`, `!alo`, `!haupei`, `!buen día`) | Todos | Saludo |
+| `!mode video\|chat\|hybrid` | Dueño | Cambia el modo de atención en vivo |
+| `!agenda` | Dueño | Lista el plan del día |
+| `!agenda <texto>` | Dueño | Agrega una tarea/idea a la agenda |
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+## Subsistemas opcionales
+
+Todos están **apagados por defecto** y se activan desde el `.env`:
+
+- **Visión** (`VISION_ENABLED`) — Mai-chan "ve" la pantalla y reacciona. Usa un VLM
+  (`qwen3-vl`) para describir el frame, con anti-spam por diferencia de escena.
+  Prototipo standalone: `poetry run python -m src.screen_vision`.
+- **MediaController** (`MEDIA_CONTROL_ENABLED`) — evita que el audio del video pise la voz
+  de Mai-chan: **pausa** (tecla multimedia) o **duckea** el volumen (`pycaw`, por app)
+  mientras ella habla. Nivel 1 (solo simula inputs, sin control autónomo de la PC).
+- **VAD de loopback** (`MEDIA_VAD_ENABLED`) — en vez de asumir, **detecta en vivo** si el
+  video tiene voz: captura el audio del sistema (loopback WASAPI vía `pyaudiowpatch`) y lo
+  pasa por **Silero VAD** (reusado de faster-whisper). Así la música/SFX no disparan cortes.
+  Degrada al heurístico `MEDIA_ASSUME_DIALOGO` si falta la dependencia/dispositivo.
+- **Modo de atención** (`ATTENTION_MODE`) — `VIDEO_FIRST` / `CHAT_FIRST` / `HYBRID`.
+- **Director** (`DIRECTOR_ENABLED`) — cuando hay silencio, Mai-chan habla sola: retoma su
+  agenda del día o suelta un comentario, para que el stream no quede mudo.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+## Documentación
+
+Documentación detallada del diseño y la dirección del proyecto en `docs/`:
+
+- **`docs/plan_vision_general.md`** — plan general de visión/reacción.
+- **`docs/PLAN_NEURO_V2.md`** — diseño objetivo de la reescritura v2 (Qwen3-Omni, subastas
+  de mensajes pagos en la cola, Discord voice, barge-in con Silero VAD). *Diseño, no código actual.*
+- **`docs/REPORTE_MEJORAS_STT_AUDIO.md`** — notas de tuning de STT/audio.
+
+> El proyecto se gobierna con `CLAUDE.md` (instrucciones de arquitectura y convenciones).
+> El README upstream original quedó obsoleto: confiá en el código y en `docs/`.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+<!-- CONTRIBUTING -->
+
+## Contribuir
+
+Las contribuciones son bienvenidas. Antes de abrir un PR, asegurate de que pase `make lint`.
+
+1. Forkeá el proyecto
+2. Creá tu rama (`git checkout -b feature/MiFeature`)
+3. Commiteá tus cambios (`git commit -m 'Agrega MiFeature'`)
+4. Pusheá la rama (`git push origin feature/MiFeature`)
+5. Abrí un Pull Request
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+<!-- LICENSE -->
+
+## Licencia
+
+Distribuido bajo la licencia MIT.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+## Agradecimientos
+
+- [Kuebiko](https://github.com/adi-panda/Kuebiko) — proyecto original del que es fork.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 <!-- MARKDOWN LINKS & IMAGES -->
-<!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
-
-[contributors-shield]: https://img.shields.io/github/contributors/github_username/repo_name.svg?style=for-the-badge
-[contributors-url]: https://github.com/adi-panda/Kuebiko/graphs/contributors
-[forks-shield]: https://img.shields.io/github/forks/adi-panda/Kuebiko.svg?style=for-the-badge
-[forks-url]: https://github.com/adi-panda/Kuebiko/network/members
-[stars-shield]: https://img.shields.io/github/stars/adi-panda/Kuebiko.svg?style=for-the-badge
-[stars-url]: https://github.com/adi-panda/Kuebiko/stargazers
-[issues-shield]: https://img.shields.io/github/issues/adi-panda/Kuebiko.svg?style=for-the-badge
-[issues-url]: https://github.com/github_username/repo_name/issues
-[license-shield]: https://img.shields.io/github/license/github_username/repo_name.svg?style=for-the-badge
-[license-url]: https://github.com/github_username/repo_name/blob/master/LICENSE.txt
-[linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=for-the-badge&logo=linkedin&colorB=555
-[linkedin-url]: https://www.linkedin.com/in/adipanda/
-[product-screenshot]: images/screenshot.webp
-[Next.js]: https://img.shields.io/badge/next.js-000000?style=for-the-badge&logo=nextdotjs&logoColor=white
-[Next-url]: https://nextjs.org/
-[React.js]: https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB
-[React-url]: https://reactjs.org/
-[Vue.js]: https://img.shields.io/badge/Vue.js-35495E?style=for-the-badge&logo=vuedotjs&logoColor=4FC08D
-[Vue-url]: https://vuejs.org/
-[Angular.io]: https://img.shields.io/badge/Angular-DD0031?style=for-the-badge&logo=angular&logoColor=white
-[Angular-url]: https://angular.io/
-[Svelte.dev]: https://img.shields.io/badge/Svelte-4A4A55?style=for-the-badge&logo=svelte&logoColor=FF3E00
-[Svelte-url]: https://svelte.dev/
-[Laravel.com]: https://img.shields.io/badge/Laravel-FF2D20?style=for-the-badge&logo=laravel&logoColor=white
-[Laravel-url]: https://laravel.com
-[Bootstrap.com]: https://img.shields.io/badge/Bootstrap-563D7C?style=for-the-badge&logo=bootstrap&logoColor=white
-[Bootstrap-url]: https://getbootstrap.com
-[JQuery.com]: https://img.shields.io/badge/jQuery-0769AD?style=for-the-badge&logo=jquery&logoColor=white
-[JQuery-url]: https://jquery.com
-
-### Instructions
-
-Replace API Keys in code and add google cloud json file and program should work!
+[forks-shield]: https://img.shields.io/github/forks/edgarvaldez99/neuro-sama.svg?style=for-the-badge
+[forks-url]: https://github.com/edgarvaldez99/neuro-sama/network/members
+[stars-shield]: https://img.shields.io/github/stars/edgarvaldez99/neuro-sama.svg?style=for-the-badge
+[stars-url]: https://github.com/edgarvaldez99/neuro-sama/stargazers
+[issues-shield]: https://img.shields.io/github/issues/edgarvaldez99/neuro-sama.svg?style=for-the-badge
+[issues-url]: https://github.com/edgarvaldez99/neuro-sama/issues

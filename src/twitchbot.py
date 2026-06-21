@@ -2,18 +2,48 @@ import asyncio
 import json
 from typing import List
 
+from decouple import config as environ  # type: ignore
 from twitchio.ext import commands  # type: ignore
 
+from . import memory
 from .chat_ollama import ollama_completion
 from .chattypes import ChatCompletionMessage
 from .credentials import BOT_NAME, TWITCH_CHANNEL, TWITCH_TOKEN
 from .filter_message import check_and_filter_user_message
+from .media_controller import MediaController
 from .tts import get_speech_by_text
 from .utils import open_file, strip_cjk
 from .vts_controller import get_vts_instance
 
+COMMAND_PREFIX = "!"
 CONVERSATION_LIMIT = 20
 MESSAGE_QUEUE_MAXSIZE = 20
+
+# Modos de atención (docs/plan_vision_general.md §7): cada modo define QUÉ
+# prioridad recibe cada fuente (chat / micro / visión / director) en la cola.
+# Número menor = se atiende antes. El micro (el dueño del stream) va siempre
+# primero; el director (acciones proactivas en silencio) siempre último, para que
+# solo rellene cuando no hay nada más. Lo que cambia entre modos es si pesa más el
+# chat o el video. Configurable por .env (ATTENTION_MODE) y en vivo con "!mode".
+ATTENTION_MODES = {
+    "VIDEO_FIRST": {"mic": 0, "vision": 1, "chat": 2, "director": 3},
+    "CHAT_FIRST": {"mic": 0, "chat": 1, "vision": 2, "director": 3},
+    "HYBRID": {"mic": 0, "chat": 1, "vision": 1, "director": 3},
+}
+DEFAULT_ATTENTION_MODE = str(environ("ATTENTION_MODE", default="HYBRID")).upper()
+
+# Director loop (autonomía, §9): en silencio, encola acciones proactivas. Apagado
+# por defecto (es intrusivo); activable por .env.
+DIRECTOR_ENABLED = environ("DIRECTOR_ENABLED", default=False, cast=bool)
+DIRECTOR_INTERVAL = float(environ("DIRECTOR_INTERVAL_SECONDS", default=45.0))
+
+# Alias amigables para el comando "!mode".
+_MODE_ALIASES = {
+    "video": "VIDEO_FIRST",
+    "chat": "CHAT_FIRST",
+    "hybrid": "HYBRID",
+    "hibrido": "HYBRID",
+}
 
 
 class FakeAuthor:
@@ -33,10 +63,25 @@ class Bot(commands.Bot):
     conversation: List[ChatCompletionMessage] = []
 
     def __init__(self):
-        self.system_prompt = open_file("prompt_chat.txt")
-        self.message_queue = asyncio.Queue(maxsize=MESSAGE_QUEUE_MAXSIZE)
+        # Memoria persistente (SQLite). El brief de sesión (capa B del plan §9:
+        # resúmenes de streams pasados + agenda de hoy) se antepone al prompt para
+        # dar continuidad entre sesiones, sin que nadie tipee nada en vivo.
+        memory.init_db()
+        self.system_prompt = self._with_session_brief(open_file("prompt_chat.txt"))
+        # Cola PRIORITARIA: chat, micro, visión y director compiten según el modo
+        # de atención. Guarda tuplas (prioridad, secuencia, mensaje); ver _enqueue.
+        self.message_queue = asyncio.PriorityQueue(maxsize=MESSAGE_QUEUE_MAXSIZE)
+        self.attention_mode = (
+            DEFAULT_ATTENTION_MODE
+            if DEFAULT_ATTENTION_MODE in ATTENTION_MODES
+            else "HYBRID"
+        )
+        self._seq = 0  # desempate FIFO dentro de una misma prioridad
         self.worker_started = False
         self.is_speaking = False  # Flag para indicar si el bot está hablando
+        # Pausa/baja el video mientras Mai-chan habla (Nivel 1). Apagado por
+        # defecto; se configura por .env (ver src/media_controller.py).
+        self.media = MediaController()
         # Referencias fuertes a tareas en segundo plano. El event loop solo
         # guarda referencias débiles, así que sin esto el GC podría recolectar
         # la tarea antes de que termine.
@@ -54,10 +99,103 @@ class Bot(commands.Bot):
         task.add_done_callback(self._background_tasks.discard)
         return task
 
+    def _enqueue(self, message, source: str) -> None:
+        """Encola un mensaje con la prioridad que su fuente tiene en el modo actual.
+
+        La cola es prioritaria: chat, micro y visión compiten según
+        `attention_mode`. El contador `_seq` desempata por orden de llegada (FIFO)
+        dentro de una misma prioridad y, además, evita que PriorityQueue intente
+        comparar los mensajes entre sí (no son comparables).
+        """
+        prio = ATTENTION_MODES[self.attention_mode].get(source, 1)
+        self._seq += 1
+        try:
+            self.message_queue.put_nowait((prio, self._seq, message))
+        except asyncio.QueueFull:
+            print(f"DEBUG: Cola llena, mensaje ({source}) descartado.")
+
+    @staticmethod
+    def _with_session_brief(base_prompt: str) -> str:
+        """Antepone al prompt un brief con la memoria episódica + la agenda de hoy.
+
+        Es la "capa B" del plan (§9): auto-generada desde lo que ya hay en SQLite,
+        para que Mai-chan arranque con continuidad ("ayer con Pedro vimos Akira",
+        "hoy toca reaccionar al video X") sin que el admin escriba nada en vivo.
+        """
+        partes = []
+        resumenes = memory.get_recent_summaries(3)
+        if resumenes:
+            partes.append(
+                "Contexto de streams anteriores (para dar continuidad):\n"
+                + "\n".join(f"- {s}" for s in resumenes)
+            )
+        agenda = memory.get_agenda()
+        if agenda:
+            partes.append(
+                "Tu plan para el stream de hoy:\n" + "\n".join(f"- {a}" for a in agenda)
+            )
+        if not partes:
+            return base_prompt
+        return base_prompt + "\n\n" + "\n\n".join(partes)
+
+    async def save_stream_summary(self) -> None:
+        """Genera con el LLM un resumen del stream y lo persiste (memoria episódica).
+
+        Se llama al apagar el bot. Si no hubo conversación o Ollama no responde, no
+        guarda nada (best-effort, nunca rompe el apagado).
+        """
+        if not Bot.conversation:
+            return
+        transcripcion = "\n".join(
+            f"{m['role']}: {m['content']}" for m in Bot.conversation
+        )
+        instruccion = (
+            "Resumí en 1-2 frases en español, en tercera persona, lo más "
+            "destacado de este stream (temas, invitados, promesas hechas al "
+            "chat). Devolvé solo el resumen, sin comillas ni JSON."
+        )
+        resumen = await asyncio.to_thread(
+            ollama_completion,
+            instruccion,
+            [{"role": "user", "content": transcripcion}],
+            json_mode=False,
+        )
+        if resumen:
+            await asyncio.to_thread(memory.save_summary, strip_cjk(resumen).strip())
+            print(f"DEBUG: Resumen del stream guardado: {resumen.strip()}")
+
+    async def director_loop(self) -> None:
+        """Autonomía (§9): en silencio, encola acciones proactivas de baja prioridad.
+
+        Si no hay nada en la cola y Mai-chan no está hablando, mete un evento del
+        "[DIRECTOR]" para que retome su plan del día o suelte un comentario, así el
+        stream no se queda mudo. Compite en la cola con prioridad mínima, de modo
+        que cualquier chat/voz/visión real lo desplaza.
+        """
+        print(f"DEBUG: Director loop activo (cada {DIRECTOR_INTERVAL}s en silencio).")
+        while True:
+            await asyncio.sleep(DIRECTOR_INTERVAL)
+            # Solo rellenar el silencio: si hay actividad, no interrumpir.
+            if self.is_speaking or not self.message_queue.empty():
+                continue
+            agenda = memory.get_agenda()
+            if agenda:
+                hint = (
+                    "(Hay un silencio en el stream. Retomá tu plan de hoy: "
+                    f"'{agenda[0]}'. Decí algo natural al respecto.)"
+                )
+            else:
+                hint = (
+                    "(Hay un silencio en el stream. Soltá un comentario espontáneo "
+                    "y natural, en tu personaje, para mantener la charla viva.)"
+                )
+            self._enqueue(FakeMessage(hint, "[DIRECTOR]"), "director")
+
     async def message_worker(self):
         """Procesa los mensajes de la cola uno por uno secuencialmente"""
         while True:
-            message = await self.message_queue.get()
+            # La cola entrega tuplas (prioridad, secuencia, mensaje).
+            _prio, _seq, message = await self.message_queue.get()
             try:
                 await self.process_message(message)
             except Exception as e:
@@ -76,11 +214,14 @@ class Bot(commands.Bot):
         if message.echo:
             return
 
-        # Encolar sin bloquear; si la cola está llena, descartar el mensaje
-        try:
-            self.message_queue.put_nowait(message)
-        except asyncio.QueueFull:
-            print("DEBUG: Cola llena, mensaje descartado.")
+        # Los comandos (!mode, !hola...) se atienden aparte y NO entran al
+        # pipeline de Ollama: si no, "!mode video" se interpretaría como algo a
+        # lo que reaccionar en vez de ejecutarse.
+        if (message.content or "").startswith(COMMAND_PREFIX):
+            await self.handle_commands(message)
+            return
+
+        self._enqueue(message, "chat")
 
     async def process_message(self, message):
         if check_and_filter_user_message(message):
@@ -104,6 +245,16 @@ class Bot(commands.Bot):
         print("------------------------------------------------------")
         print(f"{user} say: {user_question}")
 
+        # Memoria (capa 1): registrar al viewer real (no mic/visión/director). Si
+        # es su primera vez, le damos la pista al LLM para que lo salude.
+        if not isinstance(message, FakeMessage):
+            uid = str(getattr(message.author, "id", None) or user)
+            info = await asyncio.to_thread(memory.record_viewer, uid, user)
+            if info["nuevo"]:
+                user_question = (
+                    f"[{user} escribe por primera vez en tu chat] {user_question}"
+                )
+
         # Inferencia en hilo separado para no bloquear el bucle
         raw_response = await asyncio.to_thread(
             ollama_completion,
@@ -114,8 +265,6 @@ class Bot(commands.Bot):
         # Si Ollama falló (None), no respondemos nada por TTS
         if raw_response is None:
             print("DEBUG: Sin respuesta de Ollama, se omite el mensaje.")
-            if not isinstance(message, FakeMessage):
-                await self.handle_commands(message)
             return
 
         # Parsear JSON de Ollama
@@ -145,19 +294,71 @@ class Bot(commands.Bot):
         # No esperamos (await) para no retrasar el audio
         self._spawn_background(vts.trigger_emotion(emotion))
 
-        await get_speech_by_text(user_question, bot_response)
-
-        # Solo intentar procesar comandos de Twitch si el mensaje es real
-        if not isinstance(message, FakeMessage):
-            await self.handle_commands(message)
+        # Pausamos/bajamos el video JUSTO antes de que suene la voz (no antes de
+        # generar: mientras Ollama piensa el video puede seguir). Se restaura en
+        # el finally pase lo que pase, para no dejar el video pausado/silenciado.
+        self.media.antes_de_hablar()
+        try:
+            await get_speech_by_text(user_question, bot_response)
+        finally:
+            self.media.al_terminar()
 
     async def inject_mic_message(self, text: str):
-        """Inyecta un mensaje de voz en la cola del bot."""
+        """Inyecta un mensaje de voz (micro del streamer) en la cola del bot."""
         message = FakeMessage(content=text, author_name="Streamer")
-        try:
-            self.message_queue.put_nowait(message)
-        except asyncio.QueueFull:
-            print("DEBUG: Cola llena, mensaje de voz descartado.")
+        self._enqueue(message, "mic")
+
+    async def inject_vision_message(self, descripcion: str):
+        """
+        Inyecta lo que Mai-chan ve en pantalla como un evento más de la cola.
+
+        Etapa 2 de la arquitectura de visión (ver docs/plan_vision_general.md
+        §5.3): el VLM ya describió la escena; acá la metemos al MISMO pipeline que
+        chat y micro, envuelta en contexto para que el LLM de personalidad sepa
+        que es algo que VE (no algo que alguien le dijo) y reaccione en carácter.
+        """
+        content = f"(En pantalla estás viendo: {descripcion})"
+        message = FakeMessage(content=content, author_name="[VISIÓN]")
+        self._enqueue(message, "vision")
+
+    @commands.command(name="mode")
+    async def set_mode(self, ctx: commands.Context):
+        """Cambia el modo de atención en vivo. Solo el dueño del canal.
+
+        Uso: !mode video | chat | hybrid
+        """
+        if not getattr(ctx.author, "is_broadcaster", False):
+            return
+        parts = (ctx.message.content or "").split(maxsplit=1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else ""
+        nuevo = _MODE_ALIASES.get(arg)
+        if not nuevo:
+            await ctx.send(
+                f"Uso: !mode video | chat | hybrid (actual: {self.attention_mode})"
+            )
+            return
+        self.attention_mode = nuevo
+        await ctx.send(f"Modo de atención: {nuevo}")
+
+    @commands.command(name="agenda")
+    async def agenda_cmd(self, ctx: commands.Context):
+        """Gestiona el plan del día (memoria). Solo el dueño del canal.
+
+        `!agenda` lista lo pendiente; `!agenda <texto>` agrega una tarea/idea.
+        """
+        if not getattr(ctx.author, "is_broadcaster", False):
+            return
+        parts = (ctx.message.content or "").split(maxsplit=1)
+        if len(parts) < 2:
+            pendientes = memory.get_agenda()
+            if pendientes:
+                await ctx.send("Plan de hoy: " + " | ".join(pendientes))
+            else:
+                await ctx.send("Hoy no hay nada agendado. Uso: !agenda <qué hacer>")
+            return
+        tarea = parts[1].strip()
+        await asyncio.to_thread(memory.add_agenda, tarea, None, ctx.author.name or "")
+        await ctx.send(f"Agendado para hoy: {tarea}")
 
     @commands.command(name="hola", aliases=["op", "haupei", "alo", "buen día"])
     async def hello(self, ctx: commands.Context):

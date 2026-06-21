@@ -1,159 +1,112 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+AI-VTuber Twitch bot ("Mai-chan", Neuro-Sama style), forked from
+[Kuebiko](https://github.com/adi-panda/Kuebiko). Reads Twitch chat + the streamer's mic
+(+ optionally the screen), generates an in-character reply via a local LLM, synthesizes speech,
+drives a VTube Studio avatar's emotion, and plays the audio back (routed into OBS/VTS via a virtual
+audio cable). The stack is **100% local/free** (the old paid-cloud modules — OpenAI, ElevenLabs,
+Cartesia, Google TTS, Speaker.bot — were deleted in commit `b5fd38c`); the only online piece is
+Edge TTS, swappable for fully-offline Piper.
 
-## What this is
+`README.md` is the upstream's and is **out of date** — trust the code and `docs/` over it.
 
-An AI-VTuber Twitch chat bot ("Mai-chan" / Neuro-Sama style). It reads Twitch chat **and** the
-streamer's microphone, generates a character response via a local LLM, synthesizes speech, drives a
-VTube Studio avatar's emotion, and plays the audio back (routed into OBS/VTube Studio via a virtual
-audio cable). Forked from upstream [Kuebiko](https://github.com/adi-panda/Kuebiko) — the `README.md`
-is the upstream's and is **out of date**; trust the code and `docs/` over it.
+## Environment (not obvious from the code)
 
-The migration to a **100% local / free stack is essentially complete**: the old paid-cloud modules
-(OpenAI, ElevenLabs, Cartesia, Google TTS, Speaker.bot, the legacy `queue_consumer` system) were
-**deleted** in commit `b5fd38c` ("migra a stack 100% local y limpia codigo/deps legacy"). Only the
-local pipeline remains. The lone online dependency is Edge TTS (Microsoft voices), which is the default
-TTS but can be swapped for fully-offline Piper.
+- **Windows-only in practice:** playback needs **VLC installed on the OS**; STT and vision need an
+  **NVIDIA GPU + CUDA**; `pycaw`, `PIL.ImageGrab`, the Win32 media key and the `WinError 32`
+  file-handle dance are all Windows-specific.
+- **Ollama runs in WSL2** (dev) at `http://127.0.0.1:11434`. The `qwen3-vl` vision models need a
+  **recent Ollama** (>= 0.30; v0.5.7 rejects them with HTTP 412). Update with
+  `wsl -e bash -c "curl -fsSL https://ollama.com/install.sh | sh"`. **Use the `-instruct`
+  variant** (`qwen3-vl:4b-instruct` / `:8b-instruct`) — the plain `qwen3-vl:4b` is the *thinking*
+  variant and hangs reasoning forever instead of emitting the description (`think:false` /
+  `/no_think` don't stop it in this build).
+- **Two machines, one codebase:** dev = this PC (**GTX 1660 6GB**), prod = another PC
+  (**RTX 3090 24GB**). All models/params come from `.env`, so the same code runs on both — code
+  defaults target the 3090; the dev `.env` overrides down to smaller models.
+- **CUDA DLLs on Windows** ship as the `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` pip packages;
+  `src/stt_local.py` patches them onto the DLL search path at import time (fixes
+  `cublas64_12.dll not found`).
+- **Launch only via `main.py`:** it sets `BASE_DIR_PATH=cwd`, which many modules use to resolve
+  paths (`prompt_chat.txt`, `audios/`, `emotion_hotkeys.json`). Running a submodule directly
+  misresolves paths. Exception: `check_setup` (`python -m src.check_setup`).
+- **No test suite**; `pytest` is not configured.
 
 ## Commands
 
 ```sh
-poetry install                      # install deps (requires VLC installed on the OS for playback)
-poetry run python main.py           # run the bot (no flags/modes — see Architecture)
-poetry run python -m src.check_setup # diagnose setup: checks .env, files, Ollama, VTS before launch
-
-poetry run black .                  # format
-poetry run isort .                  # sort imports
-poetry run flake8                   # lint (config in .flake8)
-poetry run mypy src                 # type check (config in mypy.ini)
-poetry run pylint src               # lint (config in pyproject.toml; tuned to match flake8/VSCode)
+poetry install
+poetry run python main.py            # run the bot
+poetry run python -m src.check_setup # diagnose .env / Ollama / VTS before launch
+poetry run python -m src.screen_vision   # standalone vision prototype (no bot)
+poetry run black . && poetry run isort . && poetry run flake8 && poetry run mypy src && poetry run pylint src
 ```
 
-There is **no test suite** and `pytest` is not configured.
+## Config & contracts (`.env`, via `python-decouple`)
 
-External services / assets the bot expects locally:
-- **Ollama** at `http://127.0.0.1:11434` serving the model named by `OLLAMA_MODEL` (default
-  `qwen2.5:3b`). The bot calls `/api/chat` in **JSON mode** (`format: "json"`) — the system prompt
-  must instruct the model to return JSON.
-- **Faster-Whisper** for STT runs on an **NVIDIA GPU via CUDA** (`device="cuda"`, `float16`). On
-  Windows the CUDA DLLs ship as the `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` pip packages and
-  `src/stt_local.py` patches them onto the DLL search path at import time (fixes `cublas64_12.dll not
-  found`). The Whisper model auto-downloads to `models/stt/` on first run.
-- **VTube Studio** with its plugin API enabled on `VTS_PORT` (default 8001), for avatar emotion
-  hotkeys. Optional — the bot runs fine without it (`check_setup` treats it as a warning, not an error).
-- **Piper voice files** at `models/tts/es_MX-ald-medium.onnx` (+ `.onnx.json`) — only needed if
-  `TTS_ENGINE=piper`. Not committed.
+- Required: `TWITCH_TOKEN`, `TWITCH_CHANNEL`, `BOT_NAME`. Copy `.env.example` → `.env` (gitignored;
+  the real one also holds dead legacy cloud keys — ignore them).
+- `prompt_chat.txt` (repo root) is the character/system prompt; it **must** make the LLM reply as
+  JSON `{"response_text": ..., "emotion": ...}` — the bot calls Ollama in JSON mode and parses that.
+- `filter.json` backs `src/filter_message.py` (chat blacklist/ignore-list).
+- Optional subsystems are **off by default** and `.env`-gated: vision (`VISION_ENABLED`), media
+  control (`MEDIA_CONTROL_ENABLED`), attention mode (`ATTENTION_MODE`). See `.env.example` and
+  `docs/plan_vision_general.md`.
 
-## Configuration
+## Architecture (only the non-obvious bits)
 
-- Copy `.env.example` → `.env`. Loaded via `python-decouple` in `src/credentials.py` and read
-  ad-hoc (via `decouple.config`) in `src/tts.py`, `src/vts_controller.py`, `src/chat_ollama.py`. Vars:
-  - `TWITCH_TOKEN`, `TWITCH_CHANNEL`, `BOT_NAME` — required (Twitch identity).
-  - `OLLAMA_MODEL` — Ollama model tag (default `qwen2.5:3b`; sized for ~6GB VRAM GPUs).
-  - `TTS_ENGINE` — `edge` (default, online) or `piper` (offline).
-  - `VTS_PORT` — VTube Studio API port (default 8001).
-- `main.py` sets `os.environ["BASE_DIR_PATH"] = os.getcwd()`. Many modules read this to resolve paths
-  (audio output, `prompt_chat.txt`, `emotion_hotkeys.json`), so the bot **must be launched via
-  `main.py`** — running a submodule directly will misresolve paths. (`check_setup` is the exception;
-  it's meant to run standalone with `python -m src.check_setup`.)
-- `prompt_chat.txt` (repo root) is the system prompt / character definition, loaded fresh on start.
-  It must instruct the LLM to reply as JSON `{"response_text": ..., "emotion": ...}` (see flow below).
-- `filter.json` (repo root) backs `src/filter_message.py` (blacklist / ignore-list for chat).
+Up to four producers feed **one shared `asyncio.PriorityQueue`** on the `Bot`, so all inputs are
+serialized through a single response pipeline (never overlapping audio):
+- chat (`event_message`), mic (`LocalSTT.listen_loop` → `inject_mic_message`), vision
+  (`ScreenVision.watch_loop` → `inject_vision_message`, only when `VISION_ENABLED`), and the
+  optional `director_loop` (proactive, only when `DIRECTOR_ENABLED`).
+- Queue items are `(priority, seq, message)`. `ATTENTION_MODES` sets each source's priority per mode
+  (`VIDEO_FIRST` / `CHAT_FIRST` / `HYBRID`); the mic is always first; `seq` gives FIFO on ties.
+  Switch live with `!mode video|chat|hybrid` (broadcaster only).
+- **Commands (`!hola`, `!mode`) are NOT sent to the LLM** — handled in `event_message` and skipped
+  from the queue.
 
-## Architecture
-
-### Entry point — two concurrent input loops, one output pipeline
-
-`main.py` is now a flat async launcher (the old `Mode` enum / `VLC_CLOUD`/`SPEAKER`/`STREAMER` switch
-is **gone**). It cleans the `audios/` folder, then runs two producers against one shared `Bot`:
-
-1. `asyncio.create_task(bot.start())` — the twitchio bot listening to **Twitch chat**.
-2. `await stt.listen_loop()` — `LocalSTT` (`src/stt_local.py`) listening to the **microphone**.
-
-Both feed the **same** `asyncio.Queue` on the `Bot`, so chat and voice are serialized through one
-response pipeline (no overlapping audio).
-
-### Response pipeline (`src/twitchbot.py`)
-
-`Bot` extends `twitchio.ext.commands.Bot`. Flow is async + queue-based so the LLM/TTS never block the
-event loop:
-
-1. `event_message` (chat) → `message_queue.put_nowait` (drops on `QueueFull`, maxsize 20).
-   `inject_mic_message` (voice) does the same, wrapping the text in a `FakeMessage`.
-2. `message_worker` (one background task started on `event_ready`) pops messages **one at a time** and
-   calls `process_message`, guaranteeing sequential responses.
-3. `process_message`:
-   - filters via `src/filter_message.py`;
-   - runs the blocking `ollama_completion` via `asyncio.to_thread`;
-   - the reply is JSON — parsed into `response_text` (spoken) and `emotion` (`happy`/`sad`/`angry`/
-     `surprised`/`neutral`). `strip_cjk` (`src/utils.py`) scrubs stray CJK chars qwen sometimes emits;
-   - appends to the **class-level** `Bot.conversation` history (trimmed to `CONVERSATION_LIMIT = 20`,
-     dropping the oldest user+assistant pair);
-   - fires `vts.trigger_emotion(emotion)` as a background task (not awaited — don't delay audio);
-   - sets `self.is_speaking = True` around `get_speech_by_text(...)`, then back to `False`.
-4. **TTS dispatch:** `src/tts.py` (`get_speech_by_text`) picks the engine by `TTS_ENGINE` and delegates
-   to `texttospeech_edge.py` or `texttospeech_piper.py`. Each synthesizes a timestamped file under
-   `audios/` (`.mp3` for Edge, `.wav` for Piper) and hands it to `src/generate_audio.py`.
-5. **Playback:** `generate_audio.py` `play_audio` plays with python-vlc, waiting for the file to be
-   playing then finished. It keeps a rotating history of the last 3 files and deletes older ones with
-   retry (VLC releases the Windows file handle lazily → `WinError 32`; `_remove_with_retry` polls).
-
-**`is_speaking` is the anti-echo flag:** while the bot is playing audio, `LocalSTT.listen_loop` throws
-away mic input so the bot doesn't transcribe and answer its own voice.
-
-### STT (`src/stt_local.py`)
-
-A simple amplitude-based VAD: continuously reads the mic (must read constantly or the Windows audio
-driver blocks), accumulates frames once amplitude crosses `silence_threshold`, and after
-`silence_chunks` (~2.5s) of silence transcribes the buffer with Faster-Whisper (`language="es"`,
-`asyncio.to_thread`), then `inject_mic_message`s the text. Tuning knobs (`MODEL_SIZE`,
-`silence_threshold`, `silence_chunks`) are module constants — see `docs/REPORTE_MEJORAS_STT_AUDIO.md`.
-
-### VTS emotions (`src/vts_controller.py`)
-
-A singleton `VTSController` (via `get_vts_instance`, lock-guarded) connects + authenticates to VTube
-Studio (token cached in `vts_token.txt`; popup re-auth if revoked). Each model names its hotkeys
-differently, so `trigger_emotion` resolves the abstract emotion → a real hotkey **by keyword matching**
-(`EMOTION_KEYWORDS`) against the model's hotkey list. Resolved mappings are written to
-`emotion_hotkeys.json` as an editable per-model override scaffold. Falls back to activating a matching
-`.exp3.json` expression directly if no hotkey matches.
-
-### Component map (all modules below are active — there is no longer a legacy column)
-
-| Concern | Module |
-|---|---|
-| Entry / orchestration | `main.py`, `twitchbot.py` (asyncio.Queue, shared by chat + mic) |
-| LLM | `chat_ollama.py` (Ollama HTTP, JSON mode) |
-| STT (mic in) | `stt_local.py` (Faster-Whisper, CUDA GPU) |
-| TTS dispatch | `tts.py` → `texttospeech_edge.py` (default, online) / `texttospeech_piper.py` (offline) |
-| Audio out | `generate_audio.py` (python-vlc + `audios/` rotation) |
-| Avatar | `vts_controller.py` (VTube Studio emotion hotkeys) |
-| Text utils | `utils.py` (`open_file`, `strip_cjk`, `clean_text_for_tts`) |
-| Chat filtering | `filter_message.py` (+ `filter.json`) |
-| Config / types | `credentials.py`, `chattypes.py`, `logger.py` |
-| Setup diagnostics | `check_setup.py` |
-
-`chattypes.py` defines the `ChatCompletionMessage` shape used for history. `logger.py` is a colored
-logger; `chat_ollama.ollama_completion` takes an optional `logger` but the active path passes none and
-falls back to `print`.
+Pipeline gotchas (`src/twitchbot.py`):
+- `process_message` runs the blocking `ollama_completion` via `asyncio.to_thread`, parses the JSON
+  reply (`strip_cjk` scrubs stray CJK chars qwen emits), and appends to the **class-level**
+  `Bot.conversation` (history is global, shared across all inputs; trimmed to 20).
+- **`is_speaking` is the anti-echo flag:** while true, `LocalSTT` and `ScreenVision` throw away their
+  input so the bot never reacts to its own voice/output. Set around speech generation.
+- **`MediaController`** (`src/media_controller.py`, **Level 1 only** — simulated inputs, no autonomous
+  PC control) hooks around `get_speech_by_text` to **pause** (Win32 media key) or **duck** (`pycaw`,
+  per-app volume) the playing video so it doesn't talk over Mai-chan. Technique is source-driven;
+  whether to cut is gated by `_hay_dialogo()`. When `MEDIA_VAD_ENABLED`, that answer comes live from
+  **`LoopbackVAD`** (`src/loopback_vad.py`): a background thread captures the WASAPI **loopback**
+  (system audio) via **`pyaudiowpatch`** — the plain `pyaudio` can't do loopback on Windows — and runs
+  **Silero VAD** (reused from `faster-whisper`, no new model dep) to detect *speech* (not energy), so
+  music/SFX don't trigger a cut. It only updates a flag; the query is instant. Degrades gracefully to
+  the `MEDIA_ASSUME_DIALOGO` heuristic if the dep/device is missing.
+- **Vision is two-stage:** the VLM only *describes* the frame (objective, cheap); the personality LLM
+  turns that into an in-character comment through the normal `process_message`. `scene_difference`
+  skips unchanged frames (anti-spam).
+- **Playback** (`generate_audio.py`) uses python-vlc, rotates the last 3 `audios/` files and retries
+  deletes (VLC releases the Windows handle lazily → `WinError 32`).
+- **Memory** (`src/memory.py`) is **SQLite from the stdlib** — no server, no deps; the DB file is
+  `maichan_memory.db` (gitignored). Tables: `viewers` (new vs returning), `agenda` (today's plan,
+  populated via `!agenda`), `stream_summaries`. On start the bot prepends a *session brief* (recent
+  summaries + today's agenda) to the system prompt; on shutdown it generates and saves a one-line
+  summary. The **`director_loop`** (opt-in, `DIRECTOR_ENABLED`) is a 4th producer that, when the
+  queue is idle, enqueues a low-priority proactive action so the stream isn't silent.
 
 ## Conventions
 
-- Code comments and most docstrings/log strings are in **Spanish**; match the surrounding language.
-- twitchio, pyvts, vlc and other untyped imports use `# type: ignore`; flake8 line-length is `B950`
-  (relaxed E501); black/isort/pylint all target line length 88.
-- The local-stack modules are sprinkled with `print("DEBUG: ...")` calls — intentional WIP diagnostics
-  (audio playback and STT were heavily debugged; see `docs/REPORTE_MEJORAS_STT_AUDIO.md`).
-- Background tasks keep a **strong reference** in a module/instance-level `set` with a `done_callback`
-  that discards it — the event loop only holds weak refs, so without this the GC can kill an in-flight
-  task. Follow this pattern (`_spawn_background`, `_background_tasks`) when spawning fire-and-forget work.
-- `Bot.conversation` is **class-level** — history is global, intentionally shared across the chat and
-  mic inputs.
+- Comments / docstrings / log strings are in **Spanish** — match the surrounding language.
+- Untyped imports (twitchio, pyvts, vlc, pycaw, decouple) use `# type: ignore`; line length 88
+  (flake8 `B950` relaxes E501). Keep pylint at 10/10 — annotate intentional warnings inline.
+- `print("DEBUG: ...")` calls are intentional WIP diagnostics, not leftover debugging.
+- Fire-and-forget tasks must keep a **strong reference** (`_spawn_background` + `_background_tasks`):
+  the event loop holds only weak refs, so the GC can kill an in-flight task otherwise.
 
-## Direction
+## Direction (`docs/`)
 
-`docs/PLAN_NEURO_V2.md` is the design doc for a planned v2 rewrite (multimodal Qwen3-Omni engine,
-priority queue with paid-message auctioning, Discord voice, Silero VAD barge-in interruptions, VTube
-Studio emotion hotkeys, SQLite persistence). It describes a **target architecture, not the current
-code** — that module structure does not exist yet.
+- `PLAN_NEURO_V2.md` — target v2 rewrite (Qwen3-Omni, priority queue with paid-message auctions,
+  Discord voice, Silero VAD barge-in, SQLite). **Design, not current code.**
+- `plan_vision_general.md` — the general vision/reaction plan. Phases V2–V4 (vision integration,
+  `MediaController`, attention modes) are **done**; V1 (qwen3-vl quality) and V5 (SQLite memory +
+  `director_loop`) are pending. Supersedes the WoW-specific `plan_vision_wow.md`.
+- `REPORTE_MEJORAS_STT_AUDIO.md` — STT/audio tuning notes.
