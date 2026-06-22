@@ -28,7 +28,8 @@ quien no lo configure no ve ningún cambio de comportamiento.
 """
 
 import ctypes
-from typing import Any, List, Optional, Tuple
+import warnings
+from typing import Any, Callable, List, Optional, Tuple
 
 from decouple import config as environ  # type: ignore
 
@@ -46,8 +47,20 @@ ENABLED = environ("MEDIA_CONTROL_ENABLED", default=False, cast=bool)
 SOURCE = str(environ("MEDIA_SOURCE", default="navegador"))
 
 # Nombre del proceso cuyo volumen se baja al hacer ducking (ej: chrome.exe,
-# msedge.exe, firefox.exe, vlc.exe). Solo aplica si la técnica es "ducking".
+# msedge.exe, firefox.exe, vlc.exe). Solo se usa como FALLBACK por aplicación
+# cuando no hay un dispositivo objetivo (ver DUCK_DEVICE).
 DUCK_PROCESS = str(environ("MEDIA_DUCK_PROCESS", default="chrome.exe"))
+
+# Ducking por DISPOSITIVO (recomendado) en vez de por app: baja el volumen del
+# dispositivo de salida donde suena el video, no de un proceso. Imprescindible
+# cuando el video sale por un dispositivo distinto al del bot (ej: video en
+# "Altavoces", voz de Mai-chan por un cable virtual): el ducking por app no ve
+# las sesiones de otros dispositivos.
+#   - Vacío (por defecto) + VAD activo  => AUTO: duckea el dispositivo que el VAD
+#     detecta con el video.
+#   - Con un nombre (subcadena, ej "Altavoces") => duckea ESE dispositivo.
+#   - Vacío + sin VAD => cae al ducking por proceso (DUCK_PROCESS).
+DUCK_DEVICE = str(environ("MEDIA_DUCK_DEVICE", default=""))
 
 # A cuánto se baja el volumen del video al hablar (0.0-1.0). 0.2 = 20%.
 DUCK_LEVEL = float(environ("MEDIA_DUCK_LEVEL", default=0.2))
@@ -78,8 +91,10 @@ class MediaController:
         self.source = SOURCE
         self.tecnica = _TECNICA_POR_FUENTE.get(self.source, "ninguno")
         self._pausado = False
-        # Volúmenes guardados durante el ducking: [(sesion_volumen, valor_previo)]
-        self._saved: List[Tuple[Any, float]] = []
+        # Restauradores del ducking: [(set_volumen, valor_previo)]. Guardamos un
+        # callable por cada volumen tocado (app o dispositivo) para restaurarlo
+        # sin importar de qué tipo de interfaz vino.
+        self._saved: List[Tuple[Callable[[float], None], float]] = []
         # VAD de loopback (¿el video tiene voz ahora?). Solo tiene sentido si el
         # control está activo y la fuente realmente corta (no "gameplay"); si no
         # arranca (falta dep/dispositivo), queda None y se cae a ASSUME_DIALOGO.
@@ -102,13 +117,18 @@ class MediaController:
             return
         # Video sin voz (música/acción/escena muda) → hablar encima, no tocar nada.
         if not self._hay_dialogo():
+            print("DEBUG: Media: no corto (el video no tiene diálogo ahora).")
             return
         if self.tecnica == "pausa":
             self._tecla_play_pause()
             self._pausado = True
+            print("DEBUG: Media: video PAUSADO mientras habla Mai-chan.")
         elif self.tecnica == "ducking":
             if self._duck():
-                pass  # _saved ya quedó cargado
+                print(
+                    f"DEBUG: Media: video bajado a {int(DUCK_LEVEL * 100)}% "
+                    "mientras habla Mai-chan."
+                )
 
     def al_terminar(self) -> None:
         """Llamar JUSTO después de que termina el audio de Mai-chan."""
@@ -154,40 +174,129 @@ class MediaController:
         except Exception as e:
             print(f"DEBUG: No se pudo enviar la tecla multimedia: {e}")
 
-    # --- Técnica: ducking (pycaw, por aplicación) --------------------------
+    # --- Técnica: ducking (pycaw) ------------------------------------------
 
     def _duck(self) -> bool:
-        """Baja el volumen de la sesión de audio de DUCK_PROCESS. Guarda el previo."""
+        """Baja el volumen del video y guarda lo previo para restaurar.
+
+        Prefiere bajar el DISPOSITIVO donde suena el video (lo da el VAD o
+        DUCK_DEVICE); si no hay objetivo de dispositivo, cae al ducking por
+        aplicación (DUCK_PROCESS) en el dispositivo por defecto.
+        """
+        self._saved = []
+        objetivo = self._target_device()
+        if objetivo and self._duck_device(objetivo):
+            return True
+        return self._duck_process()
+
+    def _target_device(self) -> str:
+        """Subcadena del dispositivo a duckear: el de .env o, si está vacío, el
+        que el VAD detecta con el video (sin el sufijo ' [Loopback]')."""
+        if DUCK_DEVICE:
+            return DUCK_DEVICE
+        if self._vad is not None and self._vad.dispositivo_activo:
+            return self._vad.dispositivo_activo.replace(" [Loopback]", "")
+        return ""
+
+    def _duck_device(self, name_substr: str) -> bool:
+        """Baja el volumen del DISPOSITIVO de salida cuyo nombre contiene la
+        subcadena. No toca la voz de Mai-chan si ésta sale por otro dispositivo."""
+        vol = self._device_endpoint(name_substr)
+        if vol is None:
+            print(f"DEBUG: Ducking: no encontré el dispositivo '{name_substr}'.")
+            return False
+        try:
+            prev = vol.GetMasterVolumeLevelScalar()
+            vol.SetMasterVolumeLevelScalar(DUCK_LEVEL, None)
+            self._saved.append(
+                (lambda v: vol.SetMasterVolumeLevelScalar(v, None), prev)
+            )
+            print(f"DEBUG: Ducking por dispositivo: '{name_substr}'.")
+            return True
+        except Exception as e:  # noqa: BLE001
+            print(f"DEBUG: Ducking de dispositivo falló: {e}")
+            return False
+
+    @staticmethod
+    def _device_endpoint(name_substr: str) -> Any:
+        """Devuelve el IAudioEndpointVolume del dispositivo de salida ACTIVO cuyo
+        FriendlyName contiene la subcadena, o None."""
+        # pylint: disable=import-outside-toplevel,import-error,protected-access
+        try:
+            from ctypes import POINTER, cast
+
+            from comtypes import CLSCTX_ALL  # type: ignore
+            from pycaw.api.endpointvolume import IAudioEndpointVolume  # type: ignore
+            from pycaw.utils import AudioUtilities  # type: ignore
+        except Exception as e:  # noqa: BLE001
+            print(f"DEBUG: pycaw no disponible para ducking de dispositivo: {e}")
+            return None
+        objetivo = name_substr.lower()
+        with warnings.catch_warnings():
+            # pycaw emite UserWarning al leer propiedades de dispositivos
+            # deshabilitados/ausentes durante el enumerado; lo silenciamos.
+            warnings.simplefilter("ignore")
+            try:
+                dispositivos = AudioUtilities.GetAllDevices()
+            except Exception:  # noqa: BLE001
+                return None
+        for dev in dispositivos:
+            nombre = dev.FriendlyName or ""
+            if objetivo not in nombre.lower():
+                continue
+            if getattr(dev.state, "name", "") != "Active":
+                continue
+            try:
+                iface = dev._dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                return cast(iface, POINTER(IAudioEndpointVolume))
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
+    def _duck_process(self) -> bool:
+        """Fallback: baja el volumen de la sesión de DUCK_PROCESS (por app)."""
         try:
             # Import lazy a propósito: pycaw es opcional y solo-Windows; si no
             # está instalado, el ducking se desactiva sin romper el resto.
-            # pylint: disable=import-outside-toplevel
+            # pylint: disable=import-outside-toplevel,import-error,protected-access
             from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume  # type: ignore
-
-            self._saved = []
+        except Exception as e:  # noqa: BLE001
+            print(f"DEBUG: Ducking no disponible ({e}). ¿Instalaste pycaw?")
+            return False
+        try:
+            objetivo = DUCK_PROCESS.lower()
+            activos: List[str] = []  # nombres de apps con audio, para diagnóstico
             for session in AudioUtilities.GetAllSessions():
                 proc = session.Process
-                if proc and proc.name().lower() == DUCK_PROCESS.lower():
-                    # _ctl es la forma idiomática de pycaw de obtener la interfaz.
-                    vol = (
-                        session._ctl.QueryInterface(  # pylint: disable=protected-access
-                            ISimpleAudioVolume
-                        )
-                    )
+                if proc:
+                    activos.append(proc.name())
+                if proc and proc.name().lower() == objetivo:
+                    # pylint: disable-next=protected-access
+                    vol = session._ctl.QueryInterface(ISimpleAudioVolume)
                     prev = vol.GetMasterVolume()
-                    self._saved.append((vol, prev))
                     vol.SetMasterVolume(DUCK_LEVEL, None)
+
+                    def _set(v: float, _vol: Any = vol) -> None:
+                        _vol.SetMasterVolume(v, None)
+
+                    self._saved.append((_set, prev))
+            if not self._saved:
+                disponibles = sorted(set(activos)) or ["(ninguna)"]
+                print(
+                    f"DEBUG: Ducking: no hay sesión de audio para '{DUCK_PROCESS}' "
+                    f"(en el dispositivo por defecto). Apps con audio: "
+                    f"{', '.join(disponibles)}. Probá MEDIA_DUCK_DEVICE."
+                )
             return bool(self._saved)
-        except Exception as e:
-            print(f"DEBUG: Ducking no disponible ({e}). ¿Instalaste pycaw?")
-            self._saved = []
+        except Exception as e:  # noqa: BLE001
+            print(f"DEBUG: Ducking por proceso falló: {e}")
             return False
 
     def _restore(self) -> None:
-        """Restaura los volúmenes guardados por el ducking."""
-        try:
-            for vol, prev in self._saved:
-                vol.SetMasterVolume(prev, None)
-        except Exception as e:
-            print(f"DEBUG: No se pudo restaurar el volumen: {e}")
+        """Restaura todos los volúmenes que tocó el ducking (app y/o dispositivo)."""
+        for set_volumen, prev in self._saved:
+            try:
+                set_volumen(prev)
+            except Exception as e:  # noqa: BLE001
+                print(f"DEBUG: No se pudo restaurar el volumen: {e}")
         self._saved = []

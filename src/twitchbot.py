@@ -1,6 +1,7 @@
 import asyncio
 import json
-from typing import List
+from collections import deque
+from typing import Deque, List
 
 from decouple import config as environ  # type: ignore
 from twitchio.ext import commands  # type: ignore
@@ -18,6 +19,11 @@ from .vts_controller import get_vts_instance
 COMMAND_PREFIX = "!"
 CONVERSATION_LIMIT = 20
 MESSAGE_QUEUE_MAXSIZE = 20
+# Cuántas frases recientes de Mai-chan se le recuerdan en el prompt para que no
+# se repita. Es un buffer aparte del historial (que se recorta a 20 e incluye lo
+# que dicen los demás): acá guardamos SOLO lo que ella dijo, como lista de "no
+# repitas esto". Ver _anti_repeat_directive.
+RECENT_SAID_LIMIT = 8
 
 # Modos de atención (docs/plan_vision_general.md §7): cada modo define QUÉ
 # prioridad recibe cada fuente (chat / micro / visión / director) en la cola.
@@ -36,6 +42,32 @@ DEFAULT_ATTENTION_MODE = str(environ("ATTENTION_MODE", default="HYBRID")).upper(
 # por defecto (es intrusivo); activable por .env.
 DIRECTOR_ENABLED = environ("DIRECTOR_ENABLED", default=False, cast=bool)
 DIRECTOR_INTERVAL = float(environ("DIRECTOR_INTERVAL_SECONDS", default=45.0))
+
+# Variedad para el director: si siempre se le manda EL MISMO pedido, el LLM (con
+# temperatura baja) converge a la misma frase y suena robótico. Rotamos entre
+# semillas concretas y distintas; cada una empuja a Mai-chan a un tipo de
+# intervención diferente, así sus rellenos de silencio no se repiten.
+DIRECTOR_HINTS = [
+    "(Hay un silencio en el stream. Hacele una pregunta directa y concreta al "
+    "chat —sobre comida, juegos, planes del finde, lo que sea— para que "
+    "respondan.)",
+    "(Hay un silencio en el stream. Contá en tu personaje una anécdota corta y "
+    "medio absurda, como si te hubiera pasado a vos recién.)",
+    "(Hay un silencio en el stream. Tirá una opinión random tuya, divertida e "
+    "inofensiva, para generar charla.)",
+    "(Hay un silencio en el stream. Quejate en broma de que nadie escribe y "
+    "desafiá al chat a decir algo.)",
+    "(Hay un silencio en el stream. Proponé un mini-juego o una pregunta tipo "
+    "'¿esto o aquello?' al chat.)",
+    "(Hay un silencio en el stream. Comentá algo curioso o random que se te venga "
+    "a la cabeza en este momento, en tu personaje.)",
+]
+
+# Coletilla anti-repetición: se agrega a CUALQUIER pedido del director (incluido
+# el de la agenda) para que no calque una respuesta que ya dio hace poco.
+DIRECTOR_NO_REPEAT = (
+    " No repitas lo que ya dijiste antes en el stream; decí algo distinto y fresco."
+)
 
 # Alias amigables para el comando "!mode".
 _MODE_ALIASES = {
@@ -77,6 +109,10 @@ class Bot(commands.Bot):
             else "HYBRID"
         )
         self._seq = 0  # desempate FIFO dentro de una misma prioridad
+        self._director_idx = 0  # rota las semillas del director (anti-repetición)
+        # Últimas frases que dijo Mai-chan (anti-repetición). Buffer corto que se
+        # le recuerda en cada prompt; sobrevive al recorte del historial.
+        self._recent_said: Deque[str] = deque(maxlen=RECENT_SAID_LIMIT)
         self.worker_started = False
         self.is_speaking = False  # Flag para indicar si el bot está hablando
         # Pausa/baja el video mientras Mai-chan habla (Nivel 1). Apagado por
@@ -113,6 +149,22 @@ class Bot(commands.Bot):
             self.message_queue.put_nowait((prio, self._seq, message))
         except asyncio.QueueFull:
             print(f"DEBUG: Cola llena, mensaje ({source}) descartado.")
+
+    def _anti_repeat_directive(self) -> str:
+        """Bloque para el prompt con las últimas frases de Mai-chan a NO repetir.
+
+        Devuelve "" si todavía no dijo nada. Se concatena al system prompt en cada
+        llamada (no se guarda en el historial), para darle una orden explícita de
+        variar en vez de depender de que "se acuerde" del contexto.
+        """
+        if not self._recent_said:
+            return ""
+        lineas = "\n".join(f"- {t}" for t in self._recent_said)
+        return (
+            "\n\n[EVITÁ REPETIRTE] Ya dijiste estas frases hace muy poco. NO las "
+            "repitas ni digas algo casi igual (ni la misma idea con otras "
+            "palabras); cambiá de tema, enfoque o chiste:\n" + lineas
+        )
 
     @staticmethod
     def _with_session_brief(base_prompt: str) -> str:
@@ -185,11 +237,13 @@ class Bot(commands.Bot):
                     f"'{agenda[0]}'. Decí algo natural al respecto.)"
                 )
             else:
-                hint = (
-                    "(Hay un silencio en el stream. Soltá un comentario espontáneo "
-                    "y natural, en tu personaje, para mantener la charla viva.)"
-                )
-            self._enqueue(FakeMessage(hint, "[DIRECTOR]"), "director")
+                # Round-robin sobre las semillas: garantiza que dos rellenos
+                # seguidos nunca parten del mismo pedido (mejor que aleatorio,
+                # que podría repetir).
+                hint = DIRECTOR_HINTS[self._director_idx % len(DIRECTOR_HINTS)]
+                self._director_idx += 1
+            msg = FakeMessage(hint + DIRECTOR_NO_REPEAT, "[DIRECTOR]")
+            self._enqueue(msg, "director")
 
     async def message_worker(self):
         """Procesa los mensajes de la cola uno por uno secuencialmente"""
@@ -255,10 +309,11 @@ class Bot(commands.Bot):
                     f"[{user} escribe por primera vez en tu chat] {user_question}"
                 )
 
-        # Inferencia en hilo separado para no bloquear el bucle
+        # Inferencia en hilo separado para no bloquear el bucle. Al system prompt
+        # le sumamos (solo para esta llamada) la lista de "no repitas esto".
         raw_response = await asyncio.to_thread(
             ollama_completion,
-            self.system_prompt,
+            self.system_prompt + self._anti_repeat_directive(),
             Bot.conversation + [{"role": "user", "content": user_question}],
         )
 
@@ -285,6 +340,8 @@ class Bot(commands.Bot):
         # Actualizar historial (guardamos solo el texto para el contexto)
         Bot.conversation.append({"role": "user", "content": user_question})
         Bot.conversation.append({"role": "assistant", "content": bot_response})
+        # Registrar lo que dijo para el anti-repetición del próximo turno.
+        self._recent_said.append(bot_response)
 
         if len(Bot.conversation) > CONVERSATION_LIMIT:
             Bot.conversation = Bot.conversation[2:]

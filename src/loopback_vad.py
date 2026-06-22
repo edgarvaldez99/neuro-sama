@@ -8,10 +8,15 @@ cuando Mai-chan va a hablar. Si suena música, acción o una escena muda, habla
 encima sin tocar nada. Ver docs/plan_vision_general.md §6.1 y §6.3.
 
 Cómo funciona:
-  - Un hilo en segundo plano captura el **loopback WASAPI** (lo que sale por los
-    parlantes por defecto) con ``pyaudiowpatch`` —el ``pyaudio`` normal NO hace
+  - Un hilo en segundo plano captura el **loopback WASAPI** (lo que sale por un
+    dispositivo de salida) con ``pyaudiowpatch`` —el ``pyaudio`` normal NO hace
     loopback en Windows— y lo pasa por **Silero VAD**, el mismo modelo que ya
     trae ``faster-whisper`` (cero dependencias nuevas para el VAD en sí).
+  - **Elige solo el canal correcto**: NO escucha el dispositivo de salida por
+    defecto a ciegas (que suele ser el cable virtual por donde sale la voz de la
+    propia Mai-chan). En su lugar rastrea todos los loopbacks, descarta el del
+    bot y se engancha al que realmente tiene audio (el video). Si ese canal se
+    queda en silencio un rato, vuelve a rastrear por si el audio se mudó a otro.
   - El VAD detecta *voz humana* específicamente (no energía a secas), así que
     música/efectos no disparan el corte; sí el diálogo de una peli/serie/video.
   - El hilo solo actualiza un flag (``_hay_voz`` + marca de tiempo); la consulta
@@ -25,7 +30,7 @@ Apagado por defecto: se activa con ``MEDIA_VAD_ENABLED`` en el .env.
 
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 from decouple import config as environ  # type: ignore
@@ -42,6 +47,31 @@ VAD_THRESHOLD = float(environ("MEDIA_VAD_THRESHOLD", default=0.5))
 # Cuánto se "sostiene" la decisión de hay-voz tras el último tramo con voz, para
 # que las micro-pausas entre palabras no hagan parpadear el flag.
 HOLD_SECONDS = float(environ("MEDIA_VAD_HOLD_SECONDS", default=1.5))
+
+# Override MANUAL (opcional): nombre (o parte) del dispositivo cuyo loopback
+# escuchar. Por defecto vacío = autodetección (recomendado): el VAD busca solo el
+# canal con audio que NO sea el del bot. Fijalo solo si querés forzar uno.
+VAD_DEVICE = str(environ("MEDIA_VAD_DEVICE", default=""))
+
+# Dispositivos a IGNORAR SIEMPRE en la autodetección, además del de salida del
+# bot (subcadenas separadas por coma). Útil para excluir buses de Voicemeeter que
+# mezclan la voz de Mai-chan (si no, el VAD la escucharía a ella). Vacío por def.
+EXCLUDE_EXTRA = [
+    s.strip().lower()
+    for s in str(environ("MEDIA_VAD_EXCLUDE", default="")).split(",")
+    if s.strip()
+]
+
+# Cada cuánto, cuando el dispositivo actual está en silencio, se rastrean TODOS
+# los loopbacks para ver si el audio (el video) se mudó a otro lado (segundos).
+RESCAN_SECONDS = float(environ("MEDIA_VAD_RESCAN_SECONDS", default=5.0))
+
+# RMS mínimo (sobre audio normalizado [-1,1]) para considerar que un dispositivo
+# "tiene audio". Por debajo de esto se lo trata como silencio.
+ENERGY_SILENCE = float(environ("MEDIA_VAD_ENERGY", default=0.003))
+
+# Cuánto audio se lee de cada dispositivo al rastrear su energía (segundos).
+_PROBE_SECONDS = 0.25
 
 # Silero VAD solo acepta 16 kHz (u 8 kHz); el loopback suele venir a 44.1/48 kHz,
 # así que remuestreamos a este destino.
@@ -61,6 +91,10 @@ class LoopbackVAD:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._vad_options: Any = None
+        # Nombre del loopback que está escuchando ahora (el canal del video). Lo
+        # lee el MediaController para saber QUÉ dispositivo duckear. None si aún
+        # no enganchó ninguno.
+        self.dispositivo_activo: Optional[str] = None
 
     # --- Ciclo de vida ------------------------------------------------------
 
@@ -71,7 +105,7 @@ class LoopbackVAD:
         # Imports perezosos: ambas deps son opcionales/solo-Windows. Si falta
         # alguna, el VAD se desactiva sin romper el resto del bot.
         try:
-            # pylint: disable=import-outside-toplevel,unused-import
+            # pylint: disable=import-outside-toplevel,unused-import,import-error
             import pyaudiowpatch  # type: ignore # noqa: F401
             from faster_whisper.vad import VadOptions, get_vad_model
         except Exception as e:  # noqa: BLE001
@@ -91,7 +125,7 @@ class LoopbackVAD:
         )
         self._thread.start()
         self.disponible = True
-        print("DEBUG: VAD de loopback iniciado (escuchando el audio del sistema).")
+        print("DEBUG: VAD de loopback iniciado (autodetectando el canal del video).")
         return True
 
     def stop(self) -> None:
@@ -100,6 +134,7 @@ class LoopbackVAD:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
         self.disponible = False
+        self.dispositivo_activo = None
 
     # --- Consulta (instantánea, no bloquea) ---------------------------------
 
@@ -114,38 +149,79 @@ class LoopbackVAD:
     # --- Hilo de captura ----------------------------------------------------
 
     def _run(self) -> None:
-        # pylint: disable=import-outside-toplevel
+        # pylint: disable=import-outside-toplevel,import-error
         import pyaudiowpatch as pyaudio  # type: ignore
         from faster_whisper.vad import get_speech_timestamps
 
         audio = None
         stream = None
+        dev: Optional[dict] = None
+        last_scan = 0.0
+        last_signal = 0.0
         try:
             audio = pyaudio.PyAudio()
-            dev = self._find_loopback_device(audio, pyaudio)
-            if dev is None:
-                print("DEBUG: No se encontró dispositivo de loopback WASAPI; VAD off.")
+            # Nombre del dispositivo de salida del bot: nunca se escucha a sí misma.
+            excluir = self._bot_device_name(audio, pyaudio)
+            # Si no hay ningún loopback candidato (raro), degradar a fallback.
+            if not VAD_DEVICE and not self._candidate_loopbacks(audio, excluir):
+                print("DEBUG: VAD: no hay loopbacks aparte del bot; VAD off.")
                 self.disponible = False
                 return
-            src_rate = int(dev["defaultSampleRate"])
-            channels = max(1, int(dev["maxInputChannels"]))
-            chunk = int(src_rate * _WINDOW_SECONDS)
-            stream = audio.open(
-                format=pyaudio.paInt16,
-                channels=channels,
-                rate=src_rate,
-                input=True,
-                input_device_index=int(dev["index"]),
-                frames_per_buffer=chunk,
-            )
+
             while not self._stop.is_set():
+                now = time.monotonic()
+
+                # (Re)elegir dispositivo: al arranque (dev None) o cuando el actual
+                # lleva un rato en silencio (el video pudo haberse mudado de canal).
+                necesita_scan = dev is None or (
+                    now - last_signal > RESCAN_SECONDS
+                    and now - last_scan > RESCAN_SECONDS
+                )
+                if necesita_scan:
+                    last_scan = now
+                    nuevo = self._pick_active_device(audio, pyaudio, excluir)
+                    dev_idx = dev["index"] if dev is not None else None
+                    if nuevo is not None and nuevo["index"] != dev_idx:
+                        self._safe_close(stream)
+                        stream = self._open_stream(audio, pyaudio, nuevo)
+                        dev = nuevo if stream is not None else None
+                        if stream is not None:
+                            last_signal = now
+                            self.dispositivo_activo = str(nuevo["name"])
+                            print(f"DEBUG: VAD escuchando ahora: {nuevo['name']}")
+                        else:
+                            self.dispositivo_activo = None
+
+                if stream is None or dev is None:
+                    # Nada con audio todavía; esperar y reintentar el rastreo.
+                    time.sleep(0.5)
+                    continue
+
+                rate = int(dev["defaultSampleRate"])
+                channels = max(1, int(dev["maxInputChannels"]))
+                chunk = int(rate * _WINDOW_SECONDS)
+                # Lectura NO bloqueante: solo leemos cuando ya hay una ventana
+                # entera disponible. Si el canal deja de entregar frames (se apagó
+                # o es un bus virtual ocioso), no bloqueamos: el temporizador de
+                # silencio dispara un re-rastreo y saltamos a otro canal.
                 try:
+                    if stream.get_read_available() < chunk:
+                        time.sleep(0.05)
+                        continue
                     raw = stream.read(chunk, exception_on_overflow=False)
                 except Exception as e:  # noqa: BLE001
                     print(f"DEBUG: Error leyendo loopback: {e}")
                     time.sleep(0.2)
                     continue
-                mono16k = self._to_mono_16k(raw, channels, src_rate)
+
+                mono16k = self._to_mono_16k(raw, channels, rate)
+                # Energía del tramo: marca si el dispositivo sigue sonando (decide
+                # cuándo conviene re-rastrear) y evita correr Silero sobre silencio.
+                if float(np.sqrt(np.mean(mono16k**2))) >= ENERGY_SILENCE:
+                    last_signal = now
+                else:
+                    continue
+
                 try:
                     tramos = get_speech_timestamps(
                         mono16k,
@@ -163,48 +239,133 @@ class LoopbackVAD:
             print(f"DEBUG: El VAD de loopback se detuvo: {e}")
             self.disponible = False
         finally:
-            if stream is not None:
-                try:
-                    stream.stop_stream()
-                    stream.close()
-                except Exception:  # noqa: BLE001
-                    pass
+            self._safe_close(stream)
             if audio is not None:
                 try:
                     audio.terminate()
                 except Exception:  # noqa: BLE001
                     pass
 
-    # --- Helpers ------------------------------------------------------------
+    # --- Selección de dispositivo ------------------------------------------
 
     @staticmethod
-    def _find_loopback_device(audio: Any, pyaudio: Any) -> Optional[dict]:
-        """
-        Encuentra el dispositivo de loopback del altavoz por defecto.
+    def _safe_close(stream: Any) -> None:
+        """Cierra un stream de pyaudio sin reventar si ya estaba cerrado/None."""
+        if stream is None:
+            return
+        try:
+            stream.stop_stream()
+            stream.close()
+        except Exception:  # noqa: BLE001
+            pass
 
-        En WASAPI, el loopback de un altavoz es un dispositivo de *entrada*
-        espejo. Tomamos el output por defecto y buscamos su loopback asociado.
-        """
+    @staticmethod
+    def _open_stream(audio: Any, pyaudio: Any, dev: dict) -> Any:
+        """Abre el stream de loopback de ``dev``. Devuelve None si falla."""
+        rate = int(dev["defaultSampleRate"])
+        try:
+            return audio.open(
+                format=pyaudio.paInt16,
+                channels=max(1, int(dev["maxInputChannels"])),
+                rate=rate,
+                input=True,
+                input_device_index=int(dev["index"]),
+                frames_per_buffer=int(rate * _WINDOW_SECONDS),
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"DEBUG: No pude abrir {dev['name']}: {e}")
+            return None
+
+    @staticmethod
+    def _bot_device_name(audio: Any, pyaudio: Any) -> str:
+        """Nombre del dispositivo de salida por defecto (por donde habla el bot)."""
         try:
             wasapi = audio.get_host_api_info_by_type(pyaudio.paWASAPI)
-        except Exception:  # noqa: BLE001
-            return None
-        try:
             salida = audio.get_device_info_by_index(wasapi["defaultOutputDevice"])
+            return str(salida["name"])
         except Exception:  # noqa: BLE001
-            salida = None
-        # Si el output por defecto ya es un loopback, usarlo directo.
-        if salida is not None and salida.get("isLoopbackDevice"):
-            return salida
-        nombre = salida["name"] if salida else ""
+            return ""
+
+    @staticmethod
+    def _candidate_loopbacks(audio: Any, excluir: str) -> List[dict]:
+        """Loopbacks candidatos: todos menos el del bot y los excluidos a mano."""
+        fuera = [excluir.lower()] if excluir else []
+        fuera += EXCLUDE_EXTRA
+        cands: List[dict] = []
         try:
             for loop in audio.get_loopback_device_info_generator():
-                # El loopback se llama igual que el altavoz (+ "[Loopback]").
-                if not nombre or nombre in loop["name"]:
-                    return loop
+                nombre = str(loop["name"]).lower()
+                if any(f and f in nombre for f in fuera):
+                    continue
+                cands.append(loop)
         except Exception:  # noqa: BLE001
+            return []
+        return cands
+
+    @staticmethod
+    def _probe_energy(audio: Any, pyaudio: Any, dev: dict) -> float:
+        """Mide el RMS del loopback de ``dev`` SIN bloquear (0.0 si silencio/falla).
+
+        Clave: los buses virtuales ociosos (Voicemeeter) no entregan frames y un
+        ``read`` bloqueante colgaría el hilo para siempre. Por eso solo leemos lo
+        que ``get_read_available`` reporta como ya disponible, con un tope de espera.
+        """
+        rate = int(dev["defaultSampleRate"])
+        channels = max(1, int(dev["maxInputChannels"]))
+        n = int(rate * _PROBE_SECONDS)
+        stream = None
+        try:
+            stream = audio.open(
+                format=pyaudio.paInt16,
+                channels=channels,
+                rate=rate,
+                input=True,
+                input_device_index=int(dev["index"]),
+                frames_per_buffer=n,
+            )
+            deadline = time.monotonic() + _PROBE_SECONDS + 0.3
+            while time.monotonic() < deadline and stream.get_read_available() < n:
+                time.sleep(0.02)
+            avail = stream.get_read_available()
+            if avail <= 0:
+                return 0.0
+            raw = stream.read(min(avail, n), exception_on_overflow=False)
+            data = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            if data.size == 0:
+                return 0.0
+            return float(np.sqrt(np.mean(data**2)))
+        except Exception:  # noqa: BLE001
+            return 0.0
+        finally:
+            LoopbackVAD._safe_close(stream)
+
+    def _pick_active_device(
+        self, audio: Any, pyaudio: Any, excluir: str
+    ) -> Optional[dict]:
+        """Elige el loopback (que no sea el del bot) con más audio ahora mismo.
+
+        Si ``MEDIA_VAD_DEVICE`` está fijado a mano, devuelve ese (sin rastrear
+        energía). Si no, mide el RMS de cada candidato y devuelve el más activo;
+        ``None`` si ninguno supera el umbral de silencio.
+        """
+        if VAD_DEVICE:
+            try:
+                for loop in audio.get_loopback_device_info_generator():
+                    if VAD_DEVICE.lower() in str(loop["name"]).lower():
+                        return loop
+            except Exception:  # noqa: BLE001
+                return None
             return None
-        return None
+        mejor: Optional[dict] = None
+        mejor_e = ENERGY_SILENCE
+        for loop in self._candidate_loopbacks(audio, excluir):
+            energia = self._probe_energy(audio, pyaudio, loop)
+            if energia > mejor_e:
+                mejor_e = energia
+                mejor = loop
+        return mejor
+
+    # --- Helpers ------------------------------------------------------------
 
     @staticmethod
     def _to_mono_16k(raw: bytes, channels: int, src_rate: int) -> np.ndarray:
